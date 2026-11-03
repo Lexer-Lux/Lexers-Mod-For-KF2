@@ -9,6 +9,7 @@ Enemies flash red after losing HP. Each hit lasts:
 
 The native mod gear exposes **Maximum flash duration (seconds)**, from 0 to 5,
 initially 0.60 seconds. Zero suppresses the flash. Healing does not flash.
+For example, a 1-second maximum and a loss of 10% of maximum HP give 0.1 seconds.
 Overlapping flashes remain visible until the later expiry. Linked body parts
 use their parent's HP and flash together. Spawn, save load and area changes
 clear old flashes.

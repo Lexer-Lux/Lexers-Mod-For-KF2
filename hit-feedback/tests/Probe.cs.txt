@@ -99,6 +99,13 @@ static class Probe
         Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,150);
         long at=Environment.TickCount64; Call("AfterDamage",c,m);
         Require(Times[199]-at>=490 && Times[199]-at<=510,"25 percent max HP loss gives 0.5 seconds at 2 second maximum");
+        Times[199]=0; m.WriteU16(rec+0x1A,200);
+        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,1f);
+        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,180);
+        at=Environment.TickCount64; Call("AfterDamage",c,m);
+        Require(Times[199]-at>=90 && Times[199]-at<=110,"10 percent max HP loss gives 0.1 seconds at 1 second maximum");
+        _mod.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
+        m.WriteU16(rec+0x1A,150);
         Times[199]=0;
         Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,0); Call("AfterDamage",c,m);
         Require(Times[199]-Environment.TickCount64>=1490 && Times[199]-Environment.TickCount64<=1510,"killing loss uses actual remaining HP rather than incoming overkill");
