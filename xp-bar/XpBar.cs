@@ -17,8 +17,18 @@ public sealed class XpBarMod : IMod
     const uint PacketBytes = 24;
     const string HeightSetting = "lexer.kf2.xpbar.height";
     static int _height = 4;
+    static readonly XpAnimation Animation = new();
 
-    public void OnLoad() => _height = Math.Clamp(Runtime.View.GetInt(HeightSetting, 4), 1, 16);
+    public void OnLoad()
+    {
+        _height = Math.Clamp(Runtime.View.GetInt(HeightSetting, 4), 1, 16);
+        Animation.Reset();
+    }
+    public void OnUnload() => Animation.Reset();
+
+    [PreHook("game", Address = 0x8004A040)]
+    [PreHook("game", Address = 0x8004905C)]
+    public static void ResetProgress(CpuContext c, IMemory m) => Animation.Reset();
 
     public void DrawSettings()
     {
@@ -33,8 +43,9 @@ public sealed class XpBarMod : IMod
     public static double Progress(IMemory m)
     {
         uint level = m.ReadU8(Level), xp = m.ReadU32(Experience), next = m.ReadU32(Next);
-        if (level == 0 || next == 0) return 0;
+        if (level == 0) return 0;
         if (level == 255 || xp >= 999999) return 1;
+        if (next == 0) return 0;
         uint previous;
         if (level == 1) previous = 0;
         else if (level <= 100) previous = m.ReadU32(LevelTable + (level - 2) * 12 + 8);
@@ -59,19 +70,33 @@ public sealed class XpBarMod : IMod
     {
         // Share the native HUD's visibility. A world pass behind a menu/message
         // is not another HUD; leave loading, title and death screens alone.
-        if (m.ReadU16(0x80199426) == 0 || m.ReadU16(0x80199428) == 0 ||
-            m.ReadU8(0x801994DD) != 1 || m.ReadU8(Level) == 0 || !MenuWorld.Quiet(c, m)) return;
+        uint level = m.ReadU8(Level);
+        if (m.ReadU16(0x80199426) == 0 || m.ReadU16(0x80199428) == 0 || level == 0)
+        {
+            Animation.Reset();
+            return;
+        }
+        if (m.ReadU8(0x801994DD) != 1 || !MenuWorld.Quiet(c, m)) return;
+        var (fill, earnedEnd) = Animation.Sample(m.ReadU32(Experience), (int)level, Progress(m),
+            Environment.TickCount64 / 1000d);
         uint descriptor = m.ReadU32(ActiveDescriptor), table = m.ReadU32(OrderingTable);
         if (!InRam(m, descriptor, 12) || !InRam(m, table, 8)) return;
         uint cursor = m.ReadU32(descriptor + 8), end = m.ReadU32(descriptor + 4);
         int margin = Display.WideMargin(320), left = -margin, width = 320 + 2 * margin;
-        int filled = Math.Clamp((int)Math.Floor(width * Progress(m)), 0, width);
-        uint bytes = filled == 0 ? PacketBytes : 2 * PacketBytes;
+        int filled = Math.Clamp((int)Math.Floor(width * fill), 0, width);
+        int highlighted = Math.Clamp((int)Math.Ceiling(width * earnedEnd), filled, width);
+        if (earnedEnd <= fill) highlighted = filled;
+        uint bytes = PacketBytes * (1u + (filled > 0 ? 1u : 0u) + (highlighted > filled ? 1u : 0u));
         if ((cursor & 3) != 0 || cursor > end || end - cursor < bytes || !InRam(m, cursor, bytes)) return;
-        // AddPrim prepends: link the fill first, then the background, so the
-        // ordering-table walk draws the dark track followed by its gold fill.
+        // AddPrim prepends. Link the track last so it draws behind both fills.
         uint entry = table + 4;
         int top = 240 - _height;
+        if (highlighted > filled)
+        {
+            Quad(m, cursor, entry, left + filled, left + highlighted, top,
+                XpAnimation.HighlightRed, XpAnimation.HighlightGreen, XpAnimation.HighlightBlue);
+            cursor += PacketBytes;
+        }
         if (filled > 0)
         {
             Quad(m, cursor, entry, left, left + filled, top, 156, 132, 76);

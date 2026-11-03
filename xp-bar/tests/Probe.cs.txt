@@ -25,6 +25,21 @@ var memory = new PSMemory();
 var cpu = new CpuContext();
 Runtime.SetContext(cpu, memory);
 var mod = new XpBarMod();
+if (args.Length == 1)
+{
+    var config = typeof(RecompOne.Runtime.Config.ConfigManager);
+    var parse = config.GetMethod("ParseInterfaceFile", BindingFlags.NonPublic | BindingFlags.Static)!;
+    var (view, _) = ((RecompOne.Runtime.Config.ViewConfig, string))parse.Invoke(null, [File.ReadAllText(args[0])])!;
+    config.GetProperty("View")!.SetValue(null, view);
+    mod.OnLoad();
+    int height = (int)typeof(XpBarMod).GetField("_height", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new {
+        enabled = view.GetBool("mods.lexer.kf2.xp-bar.enabled", false), height
+    }));
+    mod.OnUnload();
+    AssertSilent();
+    return;
+}
 const uint Experience = 0x80199414, Next = 0x80199418, Level = 0x8019941C, LevelTable = 0x8007682C;
 const uint Descriptor = 0x801E0000, Table = 0x801E0100, Buffer = 0x801E1000;
 const uint ActiveDescriptor = 0x8017E0A4, OrderingTable = 0x8018E0A8, NativeCursor = 0x8006E914;
@@ -129,7 +144,33 @@ CheckPacket(Buffer, 0, 320, 236, "Zero-progress track fits in one packet");
 Require(memory.ReadU32(Descriptor + 8) == Buffer + 24 && memory.ReadU32(NativeCursor) == Buffer + 24,
     "zero progress consumes only one packet");
 Character(1, 50, 50); ResetBuffer(); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer, 0, 320, 236, "Newly earned full-width highlight");
+Require(memory.ReadU32(Buffer + 4) == 0x2880D8F8, "earned packet is pale gold");
+XpBarMod.ResetProgress(cpu, memory); ResetBuffer(); XpBarMod.Draw(cpu, memory);
 CheckPacket(Buffer, 0, 320, 236, "Full-progress fill reaches the entire screen width");
+Require(memory.ReadU32(Buffer + 4) == 0x284C849C, "load/new game seed resolves directly to normal fill");
+
+var animation = new XpAnimation();
+Near(animation.Sample(10, 1, .2, 0).Fill, .2, "initial sample has no gain animation");
+var gain = animation.Sample(30, 1, .6, 1);
+Near(gain.Fill, .2, "gain retains old fill on the first frame");
+Near(gain.EarnedEnd, .6, "highlight immediately reaches the new value");
+var mid = animation.Sample(30, 1, .6, 1.225);
+Near(mid.Fill, .55, "half-time cubic ease-out consumes seven eighths of the gain");
+var overlap = animation.Sample(40, 1, .8, 1.225);
+Near(overlap.Fill, mid.Fill, "overlapping gain starts at the current fill without jumping");
+Near(overlap.EarnedEnd, .8, "overlap extends the highlight immediately");
+Near(animation.Sample(40, 1, .8, 2).Fill, .8, "overlap settles at the final value");
+Near(animation.Sample(200, 4, .2, 3).EarnedEnd, 1, "multiple levels first highlight to the current lap boundary");
+var wrapped = animation.Sample(200, 4, .2, 3.225);
+Require(wrapped.Fill > 0 && wrapped.Fill < 1, "multiple level crossings stay inside one drawable lap");
+Near(animation.Sample(200, 4, .2, 4).Fill, .2, "multi-level gain resolves without a queue");
+Near(animation.Sample(999999, 255, 1, 5).EarnedEnd, 1, "cap gain remains bounded");
+Near(animation.Sample(999999, 255, 1, 6).Fill, 1, "cap remains full instead of wrapping");
+Near(animation.Sample(1, 1, .02, 7).Fill, .02, "backward progress seeds without a false gain");
+animation.Reset();
+var seeded = animation.Sample(180, 4, .1, 8);
+Near(seeded.Fill, seeded.EarnedEnd, "lifecycle reset suppresses false gain even on a higher save");
 
 memory.WriteU32(LevelTable + 8, 50);
 Character(2, 50, 110); Near(XpBarMod.Progress(memory), 0, "native level boundary starts a new interval");

@@ -22,8 +22,10 @@ a complete bar. Values outside an interval are clamped without changing game dat
 
 The bar follows native HUD visibility, hides on loading/title/death screens and
 world redraws behind native menus or messages, and reads fresh state every draw.
-It keeps no save-specific progress cache. Disabling removes its single hook and
-leaves the game's character data unchanged.
+Newly earned progress appears immediately in pale gold. The regular fill eases
+over it in 0.45 seconds, restarting from the current fill if another award
+arrives. On level-up, the bar completes the current lap and wraps into the next.
+Load, New Game and disable reset the animation. The bar only reads progression.
 
 ## Verification
 

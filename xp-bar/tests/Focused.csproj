@@ -8,7 +8,7 @@
     <AssemblySearchPaths>{HintPathFromItem};{RawFileName}</AssemblySearchPaths>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Probe.cs.txt" /><Compile Include="../XpBar.cs" />
+    <Compile Include="Probe.cs.txt" /><Compile Include="../XpBar.cs" /><Compile Include="../XpAnimation.cs" />
     <Reference Include="RecompOne.Runtime"><HintPath>$(RuntimeDir)/RecompOne.Runtime.dll</HintPath></Reference>
     <Reference Include="ImGui.NET"><HintPath>$(RuntimeDir)/ImGui.NET.dll</HintPath></Reference>
     <Reference Include="KingsField2"><HintPath>$(GameAssembly)</HintPath></Reference>
