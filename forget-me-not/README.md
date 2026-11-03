@@ -13,8 +13,9 @@ The glint is a small white or red pixel star, drawn with native world primitives
 Its anchor comes from the current posed model's visible surface, including doors
 whose origin is at a hinge and containers with hollow geometry. The star twinkles
 between three and nine native pixels across. It does not tint the object.
-Opening an unlocked container with contents still present changes red back to
-white; declining a pickup or having a full inventory leaves it marked.
+Successfully using the matching key changes red back to white immediately,
+before opening. Opening a container with contents still present keeps it white;
+declining a pickup or having a full inventory leaves it marked.
 
 Explicit native packet depths let scene geometry occlude the star. Drawing
 requires the fork's normal C# model walk, enabled Z-buffer and native packet-depth
@@ -36,6 +37,9 @@ game data. New Game starts fresh. The sidecar keeps the original and newest
 snapshot per card/slot, at most twelve snapshots and eight MiB overall. It never
 edits the game save. Older unmatched snapshots start unchecked. Existing native
 opened-and-empty chest state is also respected.
+New saves use the slot confirmed by the successful native write, including when
+the game chooses the first free slot. Failed card writes publish no exploration
+snapshot.
 
 Disabling removes hooks and clears owned packet-depth hints. The sidecar remains
 so re-enabling and loading a matching save can restore knowledge. Geometry scratch

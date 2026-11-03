@@ -24,7 +24,7 @@ public static class StateChecks
         byte oldArea=m.ReadU8(area);
         int[] doorIds={0x82,0x84,0x89,0xCD};byte[] oldKinds=new byte[doorIds.Length];
         for(int i=0;i<doorIds.Length;i++)oldKinds[i]=m.ReadU8(0x80175914+(uint)doorIds[i]*24);
-        uint ra=c.RA,a0=c.A0,s1=c.S1;
+        uint ra=c.RA,a0=c.A0,s1=c.S1,v0=c.V0;
         try
         {
             states.Clear();
@@ -36,6 +36,14 @@ public static class StateChecks
             c.S1=rec;c.RA=0x80048F0C;
             ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
             Require(ForgetMeNotMod.Highlight(m,rec)==2,"actual locked notification turns container red");
+            c.A0=rec;c.V0=3;ForgetMeNotMod.Unlocked(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==2,"wrong key keeps red history");
+            c.V0=1;ForgetMeNotMod.Unlocked(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==2,"success result without native unlocked byte cannot clear red");
+            m.WriteU8(rec+0x38,255);ForgetMeNotMod.Unlocked(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"successful native unlock clears red before opening");
+            m.WriteU8(rec+0x38,1);
+            ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
             m.WriteU8(rec+0x38,254);
             Require(ForgetMeNotMod.Highlight(m,rec)==1,"open container with unclaimed contents returns white");
             c.A0=child;ForgetMeNotMod.BeginPickup(c,m);ForgetMeNotMod.PickedUp(c,m);
@@ -90,7 +98,7 @@ public static class StateChecks
             m.WriteU8(area,oldArea);states.Clear();foreach(var p in previous)states.Add(p.Key,p.Value);
             for(int i=0;i<doorIds.Length;i++)m.WriteU8(0x80175914+(uint)doorIds[i]*24,oldKinds[i]);
             pickupField.SetValue(null,previousPickup);
-            c.RA=ra;c.A0=a0;c.S1=s1;
+            c.RA=ra;c.A0=a0;c.S1=s1;c.V0=v0;
         }
     }
 }

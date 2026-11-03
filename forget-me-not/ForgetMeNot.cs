@@ -21,7 +21,7 @@ public sealed class ForgetMeNotMod : IMod
     static readonly Dictionary<string, byte> States = new Dictionary<string, byte>();
     static readonly HashSet<int> Candidates = new HashSet<int>();
     static bool _using;
-    static uint _loadSlot, _saveSlot, _pickup;
+    static uint _loadSlot, _pickup;
     // 1 = searched/opened/emptied, 2 = an actual locked attempt. Absence = unchecked.
     public void OnLoad() { States.Clear(); Candidates.Clear(); _using = false; GlintSprites.Reset(); }
     public void OnUnload() { GlintSprites.Reset(); States.Clear(); Candidates.Clear(); _using = false; }
@@ -137,6 +137,19 @@ public sealed class ForgetMeNotMod : IMod
         Candidates.Clear();
     }
 
+    [PostHook("game", Address = 0x800375EC)]
+    public static void Unlocked(CpuContext c, IMemory m)
+    {
+        // The native key matcher preserves A0 and returns 1 only on success.
+        uint rec = c.A0;
+        if (c.V0 == 1 && Slot(rec) >= 0 && (Door(m, rec) || Container(m, rec))
+            && m.ReadU8(rec + 0x38) == 255)
+        {
+            string key = Key(m, rec);
+            if (States.TryGetValue(key, out byte state) && state == 2) States.Remove(key);
+        }
+    }
+
     [PreHook("game", Address = 0x8004831C)]
     public static void BeginPickup(CpuContext c, IMemory m) { _pickup = c.A0; }
     [PostHook("game", Address = 0x8004831C)]
@@ -216,11 +229,11 @@ public sealed class ForgetMeNotMod : IMod
     public static void BeginLoad(CpuContext c, IMemory m) { _loadSlot = c.A0; }
     [PreHook("game", Address = 0x8004A040)]
     public static void Loaded(CpuContext c, IMemory m) { Restore(m, c.A0, _loadSlot); _using = false; Candidates.Clear(); GlintSprites.Reset(); }
-    [PreHook("game", Address = 0x80023764)]
-    public static void BeginSave(CpuContext c, IMemory m) { _saveSlot = c.A0; }
     [PostHook("game", Address = 0x80023764)]
     public static void Saved(CpuContext c, IMemory m)
     {
-        if (c.V0 == 0) Save(m, m.ReadU32(0x8006E98C) + 0x400, _saveSlot);
+        // A new save may choose the first free slot instead of the requested one.
+        // This byte is written only after the native card write succeeds.
+        if (c.V0 == 0) Save(m, m.ReadU32(0x8006E98C) + 0x400, m.ReadU8(0x8006E5D4));
     }
 }

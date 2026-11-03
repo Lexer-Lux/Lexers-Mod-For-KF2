@@ -1,0 +1,53 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Text.Json;
+using Lexer.Kf2.ForgetMeNot;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// Isolated sidecar contract checks, not a substitute for native card I/O.
+public static class PersistenceChecks
+{
+    public static void Run(CpuContext c, PSMemory m)
+    {
+        if(!Path.GetFileName(Environment.CurrentDirectory).StartsWith("kf2-forget-me-not-"))
+            throw new Exception("Persistence fixture requires its runner-owned temporary directory");
+        const uint buffer=0x80080000;
+        var field=typeof(ForgetMeNotMod).GetField("States",BindingFlags.Static|BindingFlags.NonPublic)!;
+        var states=(Dictionary<string,byte>)field.GetValue(null)!;
+        var previous=new Dictionary<string,byte>(states);
+        var cpu=c.Snapshot();
+        string file=Path.Combine(Environment.CurrentDirectory,"mod-data","lexer.kf2.forget-me-not.json");
+        if(File.Exists(file))throw new Exception("Unexpected pre-existing fixture sidecar");
+        try
+        {
+            states.Clear();states["0:22:120"]=2;states["0:18:179"]=1;
+            m.WriteU32(0x8006E98C,buffer);m.WriteU8(0x8006E5D4,2);
+            c.A0=0;c.V0=0;ForgetMeNotMod.Saved(c,m);
+            string written=File.ReadAllText(file);
+            var entries=JsonSerializer.Deserialize<List<ForgetMeNotMod.Snapshot>>(written)!;
+            Require(entries.Count==1&&entries[0].Slot==2,"record confirmed native slot, not requested new-save slot0");
+            Require(entries[0].Values["0:22:120"]==2&&entries[0].Values["0:18:179"]==1,"persist locked and searched knowledge");
+            states.Clear();c.A0=2;ForgetMeNotMod.BeginLoad(c,m);c.A0=buffer+0x400;ForgetMeNotMod.Loaded(c,m);
+            Require(states.Count==2&&states["0:22:120"]==2,"matching slot/card/hash restores history");
+            c.A0=1;ForgetMeNotMod.BeginLoad(c,m);c.A0=buffer+0x400;ForgetMeNotMod.Loaded(c,m);
+            Require(states.Count==0,"different slot cannot inherit history");
+            c.A0=2;ForgetMeNotMod.BeginLoad(c,m);m.WriteU8(buffer+0x400,1);c.A0=buffer+0x400;ForgetMeNotMod.Loaded(c,m);
+            Require(states.Count==0,"replacement save hash cannot inherit old history");
+            c.V0=1;ForgetMeNotMod.Saved(c,m);
+            Require(File.ReadAllText(file)==written,"failed native save cannot publish a snapshot");
+            c.V0=0;m.WriteU8(0x8006E5D4,0);ForgetMeNotMod.Saved(c,m);
+            Require(File.ReadAllText(file)==written,"invalid confirmed slot cannot publish a snapshot");
+        }
+        finally
+        {
+            states.Clear();foreach(var pair in previous)states.Add(pair.Key,pair.Value);
+            c.Restore(cpu);
+            if(File.Exists(file))File.Delete(file);
+        }
+        Console.WriteLine("PASS: persistence: confirmed new-save slot, exact identity restore, other slot/replacement isolation, failed save ignored");
+    }
+    static void Require(bool okay,string message){if(!okay)throw new Exception(message);}
+}

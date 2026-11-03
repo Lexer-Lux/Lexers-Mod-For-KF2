@@ -21,6 +21,7 @@ public static class Probe
         Console.WriteLine("PASS: geometry: door hinge, nearest surface, backface, hollow frame, full coordinates, degenerate mesh");
         var m=new PSMemory();var c=new CpuContext{SP=0x801FFFF0};var mod=new ForgetMeNotMod();mod.OnLoad();
         StateChecks.Run(c,m);
+        PersistenceChecks.Run(c,m);
         Console.WriteLine("PASS: states: white, locked red, opened-unclaimed white, refused retained, taken clear, empty clear, ordinary door, illusory excluded");
         const uint descriptor=0x80070000,buffer=0x80080000,table=0x800B0000;
         m.WriteU32(0x8017E0A4,descriptor);m.WriteU32(descriptor,buffer);m.WriteU32(descriptor+4,buffer+0x20000);
