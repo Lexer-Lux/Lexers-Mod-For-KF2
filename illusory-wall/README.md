@@ -7,8 +7,8 @@ Three independently combinable native settings:
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | On use | On | The native use button opens a hidden wall-door. Off skips that candidate while continuing the native interaction scan. |
-| On attack | Off | An actual melee hit sample on the wall starts its native opening animation. A button press without a hit does nothing. |
-| Walk through | Off | Player movement can pass through its collision footprint. The wall stays visually hidden and closed; this does not permanently open or reveal it. |
+| On attack | On | An actual melee hit sample on the wall starts its native opening animation. A button press without a hit does nothing. |
+| Walk through | On | Player movement can pass through its collision footprint. The wall stays visually hidden and closed; this does not permanently open or reveal it. |
 
 Locks remain enforced. Settings keys are `lexer.kf2.illusorywall.onuse`,
 `.onattack`, and `.walkthrough`. Disabling restores the game's native behavior.

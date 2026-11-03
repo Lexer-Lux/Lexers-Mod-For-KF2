@@ -1,7 +1,7 @@
 {
   "id": "lexer.kf2.illusory-wall",
   "name": "illusory wall",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Lexer",
   "description": "Independent use, weapon-hit and walk-through controls for confirmed hidden wall-doors.",
   "credits": "Verdite2 native source-mod API; Acranon's MIT-licensed Reveal identifies the confirmed definition 0x82 wall-door.",

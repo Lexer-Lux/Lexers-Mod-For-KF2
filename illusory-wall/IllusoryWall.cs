@@ -17,7 +17,7 @@ public sealed class IllusoryWallMod : IMod
     const uint DoorPattern = 0x8006886C;
     const string Prefix = "lexer.kf2.illusorywall.";
     const int Count = 396, Stride = 0x44, PatternLimit = 16;
-    static bool _loaded, _onUse = true, _onAttack, _walkThrough, _retrying;
+    static bool _loaded, _onUse, _onAttack, _walkThrough, _retrying;
     readonly record struct Query(uint Position, uint Radius, uint Height);
     readonly record struct Change(uint Address, byte Before, byte During);
     static readonly Stack<Query> Queries = new();
@@ -28,8 +28,8 @@ public sealed class IllusoryWallMod : IMod
     {
         Reset();
         _onUse = Runtime.View.GetBool(Prefix + "onuse", true);
-        _onAttack = Runtime.View.GetBool(Prefix + "onattack", false);
-        _walkThrough = Runtime.View.GetBool(Prefix + "walkthrough", false);
+        _onAttack = Runtime.View.GetBool(Prefix + "onattack", true);
+        _walkThrough = Runtime.View.GetBool(Prefix + "walkthrough", true);
         _loaded = true;
         Event.AddListener<OverlayLoadedEvent>(Overlay);
     }

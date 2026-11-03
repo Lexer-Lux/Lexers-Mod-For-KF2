@@ -18,6 +18,23 @@ void AssertSilent()
 }
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }
 AssertSilent();
+if (args.Length == 1)
+{
+    var config = typeof(RecompOne.Runtime.Config.ConfigManager);
+    var parse = config.GetMethod("ParseInterfaceFile", BindingFlags.NonPublic | BindingFlags.Static)!;
+    var (view, _) = ((RecompOne.Runtime.Config.ViewConfig, string))parse.Invoke(null, [File.ReadAllText(args[0])])!;
+    config.GetProperty("View")!.SetValue(null, view);
+    var installed = new IllusoryWallMod();
+    installed.OnLoad();
+    bool Effective(string name) => (bool)typeof(IllusoryWallMod).GetField(name, BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new {
+        enabled = view.GetBool("mods.lexer.kf2.illusory-wall.enabled", false),
+        use = Effective("_onUse"), attack = Effective("_onAttack"), walkThrough = Effective("_walkThrough")
+    }));
+    installed.OnUnload();
+    AssertSilent();
+    return;
+}
 var m = new PSMemory(); var c = new CpuContext { SP = 0x801FF000 };
 Runtime.SetContext(c, m);
 const uint Objects = 0x80177714, Definitions = 0x80175914, Pattern = 0x8006886C, Map = 0x801C8484;
@@ -30,7 +47,7 @@ var mod = new IllusoryWallMod(); mod.OnLoad();
 var type = typeof(IllusoryWallMod);
 void Set(string field, object value) => type.GetField(field, BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, value);
 bool Flag(string field) => (bool)type.GetField(field, BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
-Check(Flag("_onUse") && !Flag("_onAttack") && !Flag("_walkThrough"), "native-preserving defaults: use on, attack/walk off");
+Check(Flag("_onUse") && Flag("_onAttack") && Flag("_walkThrough"), "all three native settings default on");
 void Wall(int slot, ushort id = 0x82, byte kind = 2, byte behavior = 2)
 {
     uint rec = Record(slot);
@@ -71,10 +88,9 @@ Game.func_80035CC8(c,m);
 Check(IsOpen(), "actual native opened pattern applies both half shapes/models");
 Closed(); m.WriteU16(0x80199428, 100);
 c.A0 = 10*2048+1024; c.A1 = unchecked((uint)-4000); c.A2 = 10*2048+1024;
-int calls = 0;
-c.RA=0x80028150;
-IllusoryWallMod.Collision((cc,mm) => { calls++; Check(IsClosed(), "default collision unchanged"); },c,m);
-Set("_walkThrough", true);
+c.RA=0x80048B74;
+IllusoryWallMod.BeforeUseQuery(c,m); c.V0=0; IllusoryWallMod.AfterUseQuery(c,m);
+Check(c.V0==0, "all-on leaves the native use candidate available");
 c.RA=0;
 IllusoryWallMod.Collision((cc,mm) => Check(IsClosed(), "non-movement collision unchanged"),c,m);
 c.RA=0x80028150;
@@ -97,10 +113,10 @@ IllusoryWallMod.Collision((cc,mm) => mm.WriteU8(Cell(10,10)+3,99),c,m);
 Check(m.ReadU8(Cell(10,10)+3)==99, "restore does not overwrite an unrelated later change");
 Closed();
 // Real hit-sample callsite only; blocked/absent swings and dead players inert.
-Set("_onAttack",true); c.RA=0; IllusoryWallMod.WeaponSample(c,m);
+c.RA=0; IllusoryWallMod.WeaponSample(c,m);
 Check(m.ReadU16(Record(0)+8)==0, "button/non-hit callsite cannot open");
 c.RA=0x80027BE0; IllusoryWallMod.WeaponSample(c,m);
-Check(m.ReadU16(Record(0)+8)==1, "actual weapon hit sample enters native opening state");
+Check(m.ReadU16(Record(0)+8)==1, "all-on weapon hit sample enters native opening state after restored walk query");
 m.WriteU16(Record(0)+8,0); m.WriteU8(Record(0)+0x38,2); IllusoryWallMod.WeaponSample(c,m);
 Check(m.ReadU16(Record(0)+8)==0, "attack does not bypass native lock");
 m.WriteU8(Record(0)+0x38,255); m.WriteU16(0x80199428,0); IllusoryWallMod.WeaponSample(c,m);
