@@ -1,0 +1,9 @@
+{
+  "id": "lexer.kf2.better-crystals",
+  "name": "Better Crystals",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Choose native Dragon Crystal revival or reload the current character's last save before a crystal is consumed.",
+  "credits": "Verdite2 and RecompOne (MIT)",
+  "enabled": true
+}

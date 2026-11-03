@@ -1,5 +1,7 @@
 using System;
+using ImGuiNET;
 using Kf2;
+using RecompOne.Runtime;
 using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Hle;
 using RecompOne.Runtime.Memory;
@@ -13,8 +15,20 @@ public sealed class XpBarMod : IMod
     const uint LevelTable = 0x8007682C;
     const uint ActiveDescriptor = 0x8017E0A4, OrderingTable = 0x8018E0A8;
     const uint PacketBytes = 24;
+    const string HeightSetting = "lexer.kf2.xpbar.height";
+    static int _height = 4;
 
-    public void OnLoad() { }
+    public void OnLoad() => _height = Math.Clamp(Runtime.View.GetInt(HeightSetting, 4), 1, 16);
+
+    public void DrawSettings()
+    {
+        if (ImGui.SliderInt("Bar height (native pixels)", ref _height, 1, 16, "%d", ImGuiSliderFlags.AlwaysClamp))
+        {
+            _height = Math.Clamp(_height, 1, 16);
+            Runtime.View.SetInt(HeightSetting, _height);
+            Runtime.SaveView();
+        }
+    }
 
     public static double Progress(IMemory m)
     {
@@ -57,23 +71,24 @@ public sealed class XpBarMod : IMod
         // AddPrim prepends: link the fill first, then the background, so the
         // ordering-table walk draws the dark track followed by its gold fill.
         uint entry = table + 4;
+        int top = 240 - _height;
         if (filled > 0)
         {
-            Quad(m, cursor, entry, left, left + filled, 156, 132, 76);
+            Quad(m, cursor, entry, left, left + filled, top, 156, 132, 76);
             cursor += PacketBytes;
         }
-        Quad(m, cursor, entry, left, left + width, 28, 24, 20);
+        Quad(m, cursor, entry, left, left + width, top, 28, 24, 20);
         m.WriteU32(descriptor + 8, cursor + PacketBytes);
         m.WriteU32(0x8006E914, cursor + PacketBytes);
     }
 
-    static void Quad(IMemory m, uint packet, uint entry, int left, int right, byte r, byte g, byte b)
+    static void Quad(IMemory m, uint packet, uint entry, int left, int right, int top, byte r, byte g, byte b)
     {
         uint head = m.ReadU32(entry);
         m.WriteU32(packet, 0x05000000 | (head & 0x00FFFFFF));
         m.WriteU32(packet + 4, 0x28000000 | (uint)(r | g << 8 | b << 16));
-        m.WriteU16(packet + 8, unchecked((ushort)left)); m.WriteU16(packet + 10, 238);
-        m.WriteU16(packet + 12, unchecked((ushort)right)); m.WriteU16(packet + 14, 238);
+        m.WriteU16(packet + 8, unchecked((ushort)left)); m.WriteU16(packet + 10, (ushort)top);
+        m.WriteU16(packet + 12, unchecked((ushort)right)); m.WriteU16(packet + 14, (ushort)top);
         m.WriteU16(packet + 16, unchecked((ushort)left)); m.WriteU16(packet + 18, 240);
         m.WriteU16(packet + 20, unchecked((ushort)right)); m.WriteU16(packet + 22, 240);
         m.WriteU32(entry, (head & 0xFF000000) | (packet & 0x00FFFFFF));

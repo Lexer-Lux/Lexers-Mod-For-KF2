@@ -1,0 +1,81 @@
+using System.Collections;
+using System.Reflection;
+using System.Runtime.Loader;
+using Lexer.Kf2.BetterPoison;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Config;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// No Entry/window/disc/save/audio. A nonempty native queue prevents native Flush calls.
+AssemblyLoadContext.Default.Resolving+=(_,name)=>File.Exists(Path.Combine(args[0],name.Name+".dll"))?AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(args[0],name.Name+".dll")):null;
+Runtime.Headless=true;ConfigManager.Load();ConfigManager.Game.Muted=true;ConfigManager.Game.MasterVolume=0;
+using var silence=new SilenceGuard();
+var mod=new BetterPoisonMod();var m=new PSMemory();var c=new CpuContext{SP=0x801FFFF0};
+var tick=typeof(Kf2.FramePacing).GetField("_tickThisFrame",BindingFlags.Static|BindingFlags.NonPublic)!;
+tick.SetValue(null,true);
+void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
+void Set(string field,object value)=>typeof(BetterPoisonMod).GetField(field,BindingFlags.Static|BindingFlags.NonPublic)!.SetValue(null,value);
+object Get(string field)=>typeof(BetterPoisonMod).GetField(field,BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!;
+IEnumerable Pending()=>(IEnumerable)typeof(Kf2.NativeNotifications).GetField("Pending",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!;
+string[] Texts()=>Pending().Cast<object>().Select(o=>string.Concat(((byte[])o.GetType().GetProperty("Text")!.GetValue(o)!).Select(b=>b==127?' ':(char)('A'+b)))).ToArray();
+void Prepare(){mod.OnUnload();mod.OnLoad();m.WriteU16(0x80199428,100);m.WriteU16(0x80199426,100);m.WriteU8(0x801994E1,0);m.WriteU16(0x80199468,120);}
+void Pulse(){c.RA=0x8002B100;BetterPoisonMod.PoisonDamage(c,m);}
+bool draw=false;
+uint Tint(){c.RA=0x8002A67C;c.A0=60;c.A1=c.A2=0;c.A3=2400;draw=BetterPoisonMod.Tint(c,m);return c.A3;}
+Prepare();Check((float)Get("_intensity")==35f&&(float)Get("_frequency")==.25f,"defaults35percent full-scale tint intensity and0.25Hz");
+Pulse();BetterPoisonMod.Player(c,m);
+Check(Tint()==1434&&c.A0==0&&c.A1==60,"first tint after late native poison event retains full35percent peak");
+tick.SetValue(null,false);BetterPoisonMod.Player(c,m);
+Check((int)Get("_flashTicks")==40,"post-stage skipped/fallback render decision does not decay flash envelope");
+tick.SetValue(null,true);
+Check(Tint()==1434,"render-only gap before first native tint preserves full peak");
+for(int i=0;i<30;i++)BetterPoisonMod.Player(c,m);
+Pulse();Check((int)Get("_flashTicks")==10,"second poison damage does not restart slower visual envelope");
+for(int i=0;i<30;i++)BetterPoisonMod.Player(c,m);
+Pulse();Check((int)Get("_flashTicks")==40,"third poison event flashes again at4seconds");
+Check(m.ReadU16(0x80199428)==100&&m.ReadU16(0x80199468)==120,"visual hooks never alter HP or poison duration");
+Prepare();Pulse();BetterPoisonMod.Player(c,m);
+for(int i=0;i<40;i++)
+{
+    Check((int)Get("_flashTicks")==40-i,"full native world-tick envelope sample"+i);
+    Tint();BetterPoisonMod.Player(c,m);
+}
+Check((int)Get("_flashTicks")==0,"envelope ends after40actual tint opportunities, independent of skipped frames");
+Set("_flashTicks",1);Tint();Check(!draw,"integer-quantized zero RGB tail does not dilute unrelated native tints");
+Set("_frequency",0f);Pulse();Check(Tint()==0&&!draw,"zero frequency skips poison's native averaging contribution");
+Set("_frequency",.5f);Pulse();Check((int)Get("_flashTicks")==40,"native0.5Hz maximum accepts every poison event");
+BetterPoisonMod.OtherDamage(c,m);c.RA=0x8002A67C;c.A0=60;c.A1=c.A2=0;c.A3=2000;BetterPoisonMod.Tint(c,m);
+Check(c.A0==60&&c.A1==0&&c.A3==2000,"ordinary damage keeps native red and opacity");
+Prepare();BetterPoisonMod.Player(c,m);Check(Texts().SequenceEqual(new[]{"POISONED"}),"poison onset notice");
+m.WriteU16(0x80199468,0);BetterPoisonMod.Player(c,m);Check(Texts().SequenceEqual(new[]{"POISON CURED"}),"genuine cure replaces stale POISONED owner status");
+Prepare();Kf2.NativeNotifications.PostText("private-other","GOLD");BetterPoisonMod.Player(c,m);
+m.WriteU16(0x80199468,0);BetterPoisonMod.Player(c,m);
+Check(Texts().SequenceEqual(new[]{"GOLD","POISON CURED"}),"status replacement preserves other owners and their FIFO order");
+Kf2.NativeNotifications.Cancel("private-other");
+foreach(string reset in new[]{"death","load","status-reset","unobserved-death"})
+{
+    Prepare();BetterPoisonMod.Player(c,m);
+    if(reset=="unobserved-death"){m.WriteU16(0x80199428,0);BetterPoisonMod.Player(c,m);}
+    else BetterPoisonMod.Loaded(c,m);
+    m.WriteU16(0x80199468,0);m.WriteU16(0x80199428,100);BetterPoisonMod.Player(c,m);
+    Check(!Texts().Contains("POISON CURED"),reset+" never produces bogus cure on respawn");
+}
+Prepare();Set("_notifications",false);BetterPoisonMod.Player(c,m);m.WriteU16(0x80199468,0);BetterPoisonMod.Player(c,m);
+Check(!Texts().Any(),"notice toggle independent of flash settings");
+Console.WriteLine("Better Poison focused checks passed.");
+
+sealed class SilenceGuard:IDisposable
+{
+    static void Check()
+    {
+        var type=typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+        foreach(string name in new[]{"_alc","_al","_mixerThread"})
+            if(type.GetField(name,BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!=null)
+                throw new Exception("Audio silence preflight failed: "+name);
+        if((uint)type.GetField("_source",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)! != 0)
+            throw new Exception("Audio silence preflight failed: source");
+    }
+    public SilenceGuard(){Check();typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!.GetMethod("Initialize")!.Invoke(null,null);Check();Console.WriteLine("PASS: headless Audio.Initialize leaves device/context/mixer null and source zero");}
+    public void Dispose(){Check();Console.WriteLine("PASS: audio remained uninitialized after check");}
+}

@@ -1,0 +1,86 @@
+using System.Reflection;
+using Lexer.Kf2.BetterCrystals;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Config;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// No entry point, disc, native game frame, input, window or audio initialization.
+Runtime.Headless = true;
+Gpu.NoRaster = true;
+ConfigManager.Game.Muted = true;
+ConfigManager.Game.MasterVolume = 0;
+void Require(bool condition, string label)
+{
+    if (!condition) throw new Exception("FAIL: " + label);
+    Console.WriteLine("PASS: " + label);
+}
+void Silent()
+{
+    var audio = typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+    Require(new[] { "_alc", "_al", "_mixerThread" }.All(n => audio.GetField(n, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null) == null)
+        && (uint)audio.GetField("_source", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)! == 0
+        && !RecompOne.Runtime.Host.GpuJobs.Claimed, "audio and graphics hosts remain absent");
+}
+Silent();
+var m = new PSMemory();
+var c = new CpuContext();
+Runtime.SetContext(c, m);
+void Candidate()
+{
+    m.WriteU8(BetterCrystalsMod.State, 0x11);
+    m.WriteU16(BetterCrystalsMod.Hp, 0);
+    m.WriteU16(BetterCrystalsMod.MaxHp, 50);
+    m.WriteU8(BetterCrystalsMod.Count, 3);
+    m.WriteU8(BetterCrystalsMod.DragonFlag, 8);
+}
+Candidate();
+Require(BetterCrystalsMod.Eligible(m), "eligible native death reads actual crystal count and story flag");
+foreach (uint address in new[] { BetterCrystalsMod.Count, BetterCrystalsMod.DragonFlag })
+{
+    byte old = m.ReadU8(address); m.WriteU8(address, 0);
+    Require(!BetterCrystalsMod.Eligible(m), "missing crystal or native revival flag leaves death alone");
+    m.WriteU8(address, old);
+}
+m.WriteU16(BetterCrystalsMod.Hp, 1);
+Require(!BetterCrystalsMod.Eligible(m), "living HP cannot open a death choice");
+Candidate(); m.WriteU8(BetterCrystalsMod.State, 1);
+Require(!BetterCrystalsMod.Eligible(m), "alive state cannot open a death choice");
+Candidate(); m.WriteU16(BetterCrystalsMod.MaxHp, 0);
+Require(!BetterCrystalsMod.Eligible(m), "uninitialized character cannot open a death choice");
+Candidate();
+int calls = 0;
+void Original(CpuContext _, IMemory __) => calls++;
+BetterCrystalsMod.AllowNativeDecision(Original, c, m);
+Require(calls == 1, "disabled mod preserves automatic reload");
+// Set only this mod's enable gate to exercise the isolated handler without
+// installing a detour or entering any native routine in a blank-RAM fixture.
+typeof(BetterCrystalsMod).GetField("_enabled", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, true);
+BetterCrystalsMod.AllowNativeDecision(Original, c, m);
+Require(calls == 1, "eligible death reaches native crystal branch before automatic reload");
+m.WriteU8(BetterCrystalsMod.Count, 0);
+BetterCrystalsMod.AllowNativeDecision(Original, c, m);
+Require(calls == 2, "no-crystal death keeps automatic reload");
+Candidate();
+m.WriteU16(BetterCrystalsMod.DeathFrames, 30);
+BetterCrystalsMod.Player(Original, c, m);
+Require(calls == 3, "earlier frame31 special death branch executes normally");
+m.WriteU16(BetterCrystalsMod.DeathFrames, 63);
+BetterCrystalsMod.Player(Original, c, m);
+Require(calls == 4 && m.ReadU8(BetterCrystalsMod.Count) == 3, "earlier fade tick neither prompts nor consumes crystal");
+Require(!BetterCrystalsMod.Reload(c, m, 0) && !BetterCrystalsMod.Reload(c, m, 4), "invalid slots never call a native card loader");
+// Native Cross bit14 appears byte-swapped in the game's masks.
+ConfigManager.Game.Keys.Cross = "E";
+ConfigManager.Game.Keys2.Cross = "Enter";
+ConfigManager.Game.Pad.Cross = [0, 2];
+ConfigManager.Game.PadAnalog.Cross = [3];
+ConfigManager.Game.PadKind = PadKind.Digital;
+string digital = NativeChoice.Describe(0x40);
+Require(digital.Contains("E") && digital.Contains("ENTER") && digital.Contains("CROSS") && digital.Contains("SQUARE"), "labels include configured primary secondary and every digital pad binding");
+ConfigManager.Game.PadKind = PadKind.Analog;
+string analog = NativeChoice.Describe(0x40);
+Require(analog.Contains("TRIANGLE") && !analog.Contains("CROSS") && !analog.Contains("SQUARE"), "labels honor the currently selected analog pad map");
+new BetterCrystalsMod().OnUnload();
+BetterCrystalsMod.AllowNativeDecision(Original, c, m);
+Require(calls == 5 && !BetterCrystalsMod.Choosing, "unload releases the mod gate");
+Silent();

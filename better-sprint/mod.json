@@ -1,9 +1,9 @@
 {
   "id": "lexer.kf2.better-sprint",
   "name": "Better Sprint",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Lexer",
-  "description": "Configurable running drain, charged only for actual movement. Empty physical power prevents running.",
+  "description": "Movement-only running drain, optional free magic power, and release-to-run again after exhaustion.",
   "credits": "Verdite2 and RecompOne native source-mod API.",
   "enabled": true
 }

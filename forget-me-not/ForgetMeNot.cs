@@ -22,12 +22,9 @@ public sealed class ForgetMeNotMod : IMod
     static readonly HashSet<int> Candidates = new HashSet<int>();
     static bool _using;
     static uint _loadSlot, _saveSlot, _pickup;
-    static readonly uint[] Colours = new uint[8];
-    static uint _rgbc, _gteRgbc;
-    static bool _tinted;
     // 1 = searched/opened/emptied, 2 = an actual locked attempt. Absence = unchecked.
-    public void OnLoad() { States.Clear(); Candidates.Clear(); _using = false; }
-    public void OnUnload() { if (Runtime.Mem != null) RestoreLight(null!, Runtime.Mem); States.Clear(); Candidates.Clear(); _using = false; }
+    public void OnLoad() { States.Clear(); Candidates.Clear(); _using = false; GlintSprites.Reset(); }
+    public void OnUnload() { GlintSprites.Reset(); States.Clear(); Candidates.Clear(); _using = false; }
 
     static uint Record(int slot) => Objects + (uint)(slot * Stride);
     static int Slot(uint record) => record >= Objects && record < Objects + Count * Stride
@@ -39,16 +36,21 @@ public sealed class ForgetMeNotMod : IMod
     }
     static bool Door(IMemory m, uint rec)
     {
-        // These are the use handler's opening arms. The secret-door behaviour is
-        // FF, and is deliberately never eligible, including before discovery.
+        // These are the use handler's opening arms. FF also describes ordinary
+        // frozen objects, so exclude it conservatively rather than call it secret.
         byte kind = Kind(m, rec), behaviour = m.ReadU8(rec + 4);
-        return (kind == 2 || kind == 3) && (behaviour == 2 || behaviour == 3);
+        // Kind 2 also contains hidden rock walls 082/CD and unused pedestal 089.
+        // Native-tested barred gate 084 is its only positively ordinary exception.
+        return kind == 3 && behaviour == 3
+            || kind == 2 && behaviour == 2 && m.ReadU16(rec + 6) == 0x84;
     }
     static bool Container(IMemory m, uint rec)
     {
-        if (m.ReadU8(rec + 4) == 255) return false;
         byte kind = Kind(m, rec);
-        return kind == 5 || kind == 8 || kind == 9 || kind == 21 || kind == 22;
+        // Kind 5 includes Phantom Rod hidden compartments. Never advertise them.
+        // Native use dispatches on this definition kind. Ordinary static barrels
+        // and searchable props use behaviour FF; that is not an interaction gate.
+        return kind == 8 || kind == 9 || kind == 21 || kind == 22;
     }
     static string Key(IMemory m, uint rec) => m.ReadU8(Area) + ":" + Slot(rec) + ":" + m.ReadU16(rec + 6);
     static void Set(IMemory m, uint rec, byte value)
@@ -67,60 +69,28 @@ public sealed class ForgetMeNotMod : IMod
         if (Slot(rec) < 0 || (!Door(m, rec) && !Container(m, rec))) return 0;
         if (Door(m, rec) && m.ReadU16(rec + 8) != 0) return 0;
         byte kind = Kind(m, rec);
-        if ((kind == 5 || kind == 8 || kind == 22) && m.ReadU8(rec + 0x38) == 254 && Empty(m, rec)) return 0;
+        if ((kind == 8 || kind == 22) && m.ReadU8(rec + 0x38) == 254 && Empty(m, rec)) return 0;
         byte state;
-        if (States.TryGetValue(Key(m, rec), out state)) return state == 1 ? (byte)0 : (byte)2;
+        if (States.TryGetValue(Key(m, rec), out state))
+        {
+            if (state == 1) return 0;
+            // Open but unclaimed contents are unfinished loot, no longer locked.
+            return (kind == 8 || kind == 22) && m.ReadU8(rec + 0x38) == 254 ? (byte)1 : (byte)2;
+        }
         return 1;
     }
 
-    [PostHook("game", Address = 0x80034834)]
+    [PostHook("game", Address = 0x80032588)]
     public static void Glint(CpuContext c, IMemory m)
     {
-        if (_tinted || c.RA != 0x800329A0 || ModelWalk.SubmitKind != ModelKind.Object) return;
-        uint rec = ModelWalk.SubmitRecord;
-        byte highlight = Highlight(m, rec);
-        long phase = Environment.TickCount64 % 1800;
-        if (highlight == 0 || phase >= 220) return;
-        for (int i = 0; i < Colours.Length; i++) Colours[i] = Gte.ReadControl(13 + i);
-        _rgbc = m.ReadU32(0x8006E604);
-        _gteRgbc = Gte.Read(6);
-        _tinted = true;
-        // Brief surface glint in the model's own lighting, shared by the original
-        // packets and retained GPU instances. It never draws through other geometry.
-        double strength = 1.0 - Math.Abs(phase - 110) / 110.0;
-        // Blend from the original lighting, so the pulse never begins or ends
-        // with an unintended black flash.
-        for (int i = 0; i < 3; i++)
-        {
-            int target = i == 0 || highlight == 1 ? 4096 : 0;
-            Gte.WriteControl(13 + i, unchecked((uint)(int)((int)Colours[i] * (1 - strength) + target * strength)));
-        }
-        for (int i = 16; i <= 20; i++)
-        {
-            uint value = Colours[i - 13];
-            short lo = (short)((short)value * (1 - strength));
-            short hi = (short)((short)(value >> 16) * (1 - strength));
-            Gte.WriteControl(i, (ushort)lo | (uint)(ushort)hi << 16);
-        }
-        uint tint = 0;
-        for (int channel = 0; channel < 3; channel++)
-        {
-            int original = (int)(_rgbc >> (channel * 8) & 255);
-            int target = channel == 0 || highlight == 1 ? 255 : 0;
-            tint |= (uint)(original * (1 - strength) + target * strength) << (channel * 8);
-        }
-        m.WriteU32(0x8006E604, (_rgbc & 0xFF000000u) | tint);
+        if (!ModelWalk.InWalk || !ModelWalk.Enabled || !ModelWalk.SubmitEnabled || ModelWalk.Verifying
+            || ModelWalk.SubmitKind != ModelKind.Object || PlanarWalk.Mirroring || PlanarWalk.Replaying) return;
+        uint record = ModelWalk.SubmitRecord;
+        GlintSprites.Draw(c, m, record, Highlight(m, record));
     }
 
-    [PostHook("game", Address = 0x80032588)]
-    public static void RestoreLight(CpuContext c, IMemory m)
-    {
-        if (!_tinted) return;
-        for (int i = 0; i < Colours.Length; i++) Gte.WriteControl(13 + i, Colours[i]);
-        m.WriteU32(0x8006E604, _rgbc);
-        Gte.Write(6, _gteRgbc);
-        _tinted = false;
-    }
+    [PostHook("game", Address = 0x8002E064)]
+    public static void FrameHead(CpuContext c, IMemory m) => GlintSprites.Reset();
 
     [PreHook("game", Address = 0x800489FC)]
     public static void BeginUse(CpuContext c, IMemory m) { _using = true; Candidates.Clear(); }
@@ -157,6 +127,11 @@ public sealed class ForgetMeNotMod : IMod
                 // knowledge. The exposed contents arms themselves count as a search.
                 if (kind == 9 || kind == 21 || m.ReadU8(rec + 0x38) == 254) Set(m, rec, 1);
             }
+            else if (Container(m, rec) && m.ReadU8(rec + 0x38) == 254)
+            {
+                string key = Key(m, rec);
+                if (States.TryGetValue(key, out byte state) && state == 2) States.Remove(key);
+            }
         }
         _using = false;
         Candidates.Clear();
@@ -179,7 +154,7 @@ public sealed class ForgetMeNotMod : IMod
     }
 
     [PostHook("game", Address = 0x8004905C)]
-    public static void NewGame(CpuContext c, IMemory m) { States.Clear(); _using = false; Candidates.Clear(); }
+    public static void NewGame(CpuContext c, IMemory m) { States.Clear(); _using = false; Candidates.Clear(); GlintSprites.Reset(); }
 
     public sealed class Snapshot
     {
@@ -240,7 +215,7 @@ public sealed class ForgetMeNotMod : IMod
     [PreHook("game", Address = 0x80023638)]
     public static void BeginLoad(CpuContext c, IMemory m) { _loadSlot = c.A0; }
     [PreHook("game", Address = 0x8004A040)]
-    public static void Loaded(CpuContext c, IMemory m) { Restore(m, c.A0, _loadSlot); _using = false; Candidates.Clear(); }
+    public static void Loaded(CpuContext c, IMemory m) { Restore(m, c.A0, _loadSlot); _using = false; Candidates.Clear(); GlintSprites.Reset(); }
     [PreHook("game", Address = 0x80023764)]
     public static void BeginSave(CpuContext c, IMemory m) { _saveSlot = c.A0; }
     [PostHook("game", Address = 0x80023764)]

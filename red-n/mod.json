@@ -1,0 +1,9 @@
+{
+  "id": "lexer.kf2.red-n",
+  "name": "Red N",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Colors only the compass N red, preserving the other letters and compass shading.",
+  "credits": "Verdite2 and RecompOne native source-mod API.",
+  "enabled": true
+}

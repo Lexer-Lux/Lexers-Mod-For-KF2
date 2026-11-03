@@ -1,0 +1,81 @@
+using System.Reflection;
+using System.Runtime.Loader;
+using Lexer.Kf2.BetterSprint;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Config;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// No Entry, host window, disc, save, game loop or audio subsystem.
+AssemblyLoadContext.Default.Resolving+=(_,name)=>File.Exists(Path.Combine(args[0],name.Name+".dll"))?AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(args[0],name.Name+".dll")):null;
+Runtime.Headless=true;ConfigManager.Load();ConfigManager.Game.Muted=true;ConfigManager.Game.MasterVolume=0;
+using var silence=new SilenceGuard();
+var mod=new BetterSprintMod();var m=new PSMemory();var c=new CpuContext{SP=0x801FFFF0};
+const uint Power=0x8019942E,Magic=0x80199432,Pad=0x80199554,Last=0x80199556;
+const ushort Use=0x1000,Other=0x4000;
+void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
+void Set(string field,object value)=>typeof(BetterSprintMod).GetField(field,BindingFlags.Static|BindingFlags.NonPublic)!.SetValue(null,value);
+void Prepare(int power=5000,bool modern=false)
+{
+    mod.OnUnload();mod.OnLoad();Kf2.SeparateRun.Enabled=modern;
+    m.WriteU32(0x8006E568,Use);m.WriteU32(0x8006E570,0);m.WriteU32(0x8006E574,0);
+    m.WriteU16(0x80199428,100);m.WriteU8(0x801994E1,0);m.WriteU8(0x801994D8,0);
+    m.WriteU8(0x801994E5,255);m.WriteU8(0x801994AA,0);m.WriteU8(0x8019941F,0);
+    m.WriteU16(Power,(ushort)power);m.WriteU16(Magic,5000);
+    m.WriteU16(Pad,(ushort)(Other|(modern?0x200:Use)));m.WriteU16(Last,m.ReadU16(Pad));
+    m.WriteU32(0x801994EC,1000);m.WriteU32(0x801994F4,2000);
+}
+void Tick(bool moved=true,bool modern=false,Action? action=null)
+{
+    BetterSprintMod.BeforePlayer(c,m);if(modern)Kf2.SeparateRun.BeforeRun(c,m);
+    BetterSprintMod.BeforeRun(c,m);
+    if(action!=null){action();BetterSprintMod.AfterAction(c,m);}
+    Recompiled.KingsField2_game.func_8002957C(c,m);
+    BetterSprintMod.AfterRun(c,m);if(modern)Kf2.SeparateRun.AfterRun(c,m);
+    if(moved)m.WriteU32(0x801994EC,m.ReadU32(0x801994EC)+100);
+    BetterSprintMod.AfterPlayer(c,m);
+}
+Prepare();Recompiled.KingsField2_game.func_8002957C(c,m);
+Check(m.ReadU16(Power)==4500&&m.ReadU16(Magic)==4500,"actual unhooked native run drains both gauges500");
+Prepare();Tick();Check(m.ReadU16(Power)==4500&&m.ReadU16(Magic)==5000,"default physical500, no magic-power cost");
+Prepare();Set("_freeMagic",false);Set("_rate",75f);Tick();
+Check(m.ReadU16(Power)==4750&&m.ReadU16(Magic)==4750,"optional magic cost follows configured75percent-per-second rate");
+Prepare();Tick(false);Check(m.ReadU16(Power)==5000&&m.ReadU16(Magic)==5000,"stationary/wall costs neither gauge");
+Prepare();Tick(action:()=>m.WriteU16(Magic,3500));Check(m.ReadU16(Magic)==3500,"legitimate action magic-power change is preserved");
+Prepare();Tick(action:()=>{m.WriteU16(Power,0);m.WriteU16(Magic,3500);});
+Check(m.ReadU16(Magic)>=3500&&m.ReadU16(0x80199422)==0,"action exhausting physical power blocks later native run charge without undoing action cost");
+foreach(bool modern in new[]{false,true})
+{
+    Prepare(100,modern);Tick(modern:modern);Check(m.ReadU16(Power)==0,"exhaustion reaches zero");
+    m.WriteU16(Power,3000);m.WriteU16(0x80199422,2000);Tick(modern:modern);
+    Check(m.ReadU16(Power)>=3000&&m.ReadU16(0x80199422)==0,"recovered gauge cannot restart held run, including positive ramp");
+    BetterSprintMod.Menu(c,m);Tick(false,modern);
+    Check(m.ReadU16(Power)>=3000,"menu and stationary tick do not rearm held sprint");
+    Check(m.ReadU16(Pad)==(Other|(modern?0x200:Use)),"scoped run suppression restores unrelated action bits");
+    m.WriteU16(Pad,Other);m.WriteU16(Last,Other);Tick(false,modern);
+    m.WriteU16(Power,3000);
+    m.WriteU16(Pad,(ushort)(Other|(modern?0x200:Use)));m.WriteU16(Last,m.ReadU16(Pad));Tick(modern:modern);
+    Check(m.ReadU16(Power)==2500,"release and fresh press rearm sprint");
+    BetterSprintMod.Loaded(c,m);Tick(modern:modern);
+    Check(m.ReadU16(Power)>=2500,"death/load/status reset requires release of held sprint");
+    int beforeDisable=m.ReadU16(Power);
+    mod.OnUnload();Recompiled.KingsField2_game.func_8002957C(c,m);
+    // Classic uses the native bit; separate-run translation belongs to the fork.
+    if(!modern)Check(m.ReadU16(Power)==beforeDisable-500,"disable restores native running while button remains held");
+}
+Console.WriteLine("Better Sprint focused checks passed.");
+
+sealed class SilenceGuard:IDisposable
+{
+    static void Check()
+    {
+        var type=typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+        foreach(string name in new[]{"_alc","_al","_mixerThread"})
+            if(type.GetField(name,BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!=null)
+                throw new Exception("Audio silence preflight failed: "+name);
+        if((uint)type.GetField("_source",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)! != 0)
+            throw new Exception("Audio silence preflight failed: source");
+    }
+    public SilenceGuard(){Check();typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!.GetMethod("Initialize")!.Invoke(null,null);Check();Console.WriteLine("PASS: headless Audio.Initialize leaves device/context/mixer null and source zero");}
+    public void Dispose(){Check();Console.WriteLine("PASS: audio remained uninitialized after check");}
+}

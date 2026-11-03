@@ -1,0 +1,96 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using Lexer.Kf2.ForgetMeNot;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// Synthetic state transitions ONLY, inside the isolated probe's private RAM.
+// Native locked/open/pickup dispatch and rendered results need separate checks.
+public static class StateChecks
+{
+    static void Require(bool okay, string message) { if (!okay) throw new Exception(message); }
+    public static void Run(CpuContext c, PSMemory m)
+    {
+        const uint rec = 0x80177714 + 394 * 0x44, child = rec + 0x44;
+        const uint definition = 0x80175914 + 300 * 24, area = 0x8017E060;
+        var states = (Dictionary<string,byte>)typeof(ForgetMeNotMod).GetField("States",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!;
+        var pickupField=typeof(ForgetMeNotMod).GetField("_pickup",BindingFlags.Static|BindingFlags.NonPublic)!;
+        object previousPickup=pickupField.GetValue(null)!;
+        var previous = new Dictionary<string,byte>(states);
+        byte[] records = new byte[0x88], def = new byte[24];
+        for (uint i=0;i<records.Length;i++) records[i]=m.ReadU8(rec+i);
+        for (uint i=0;i<def.Length;i++) def[i]=m.ReadU8(definition+i);
+        byte oldArea=m.ReadU8(area);
+        int[] doorIds={0x82,0x84,0x89,0xCD};byte[] oldKinds=new byte[doorIds.Length];
+        for(int i=0;i<doorIds.Length;i++)oldKinds[i]=m.ReadU8(0x80175914+(uint)doorIds[i]*24);
+        uint ra=c.RA,a0=c.A0,s1=c.S1;
+        try
+        {
+            states.Clear();
+            for (uint i=0;i<records.Length;i++)m.WriteU8(rec+i,0);
+            m.WriteU8(area,250); m.WriteU16(rec+6,300); m.WriteU16(child+6,301);
+            m.WriteU8(definition,8); m.WriteU8(rec+4,8); m.WriteU8(rec+0x38,1);
+            m.WriteU16(rec+0x3A,395);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"unchecked container is white");
+            c.S1=rec;c.RA=0x80048F0C;
+            ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==2,"actual locked notification turns container red");
+            m.WriteU8(rec+0x38,254);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"open container with unclaimed contents returns white");
+            c.A0=child;ForgetMeNotMod.BeginPickup(c,m);ForgetMeNotMod.PickedUp(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"refused or declined pickup preserves unfinished loot");
+            m.WriteU16(child+6,255);ForgetMeNotMod.PickedUp(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"successful taking clears container");
+            states.Clear(); m.WriteU16(rec+0x3A,65535);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"opened empty container remains clear");
+            m.WriteU8(definition,3); m.WriteU8(rec+4,3);m.WriteU16(rec+8,0);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"ordinary unopened door is white");
+            ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==2,"locked real door is red");
+            m.WriteU16(rec+8,1);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"successfully opened door is clear");
+            m.WriteU16(rec+8,0);m.WriteU8(rec+4,255);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"frozen/unclassified door is excluded");
+            m.WriteU8(definition,5);m.WriteU8(rec+4,5);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"Phantom Rod hidden-compartment kind is excluded");
+            m.WriteU16(rec+6,0x84);m.WriteU8(0x80175914+0x84*24,2);m.WriteU8(rec+4,2);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"verified definition084 barred gate is white before interaction");
+            ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==2,"actual lock notification makes verified gate red");
+            m.WriteU16(rec+8,1);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"successful gate opening clears its glint");
+            m.WriteU16(rec+8,0);
+            foreach(int hidden in new[]{0x82,0xCD,0x89})
+            {
+                m.WriteU16(rec+6,(ushort)hidden);m.WriteU8(0x80175914+(uint)hidden*24,2);
+                Require(ForgetMeNotMod.Highlight(m,rec)==0,"hidden wall or unused pedestal stays excluded with live behaviour2: "+hidden);
+            }
+            m.WriteU16(rec+6,300);m.WriteU8(definition,9);m.WriteU8(rec+4,255);states.Clear();
+            m.WriteU16(rec+0x3A,395);m.WriteU16(child+6,301);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"ordinary static barrel remains eligible with behaviourFF");
+            c.A0=child;ForgetMeNotMod.BeginPickup(c,m);ForgetMeNotMod.PickedUp(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"static barrel survives declined or refused pickup");
+            m.WriteU16(child+6,255);ForgetMeNotMod.PickedUp(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"native removed contents clear static barrel");
+            states.Clear();m.WriteU16(rec+0x3A,65535);
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"untested empty static barrel is white until searched");
+            c.S1=rec;c.RA=0x80048F0C;
+            ForgetMeNotMod.BeginUse(c,m);ForgetMeNotMod.Notification(c,m);ForgetMeNotMod.EndUse(c,m);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"native kind9 absent-child arm confirms empty search rather than locked");
+            m.WriteU8(definition,21);states.Clear();
+            Require(ForgetMeNotMod.Highlight(m,rec)==1,"ordinary static kind21 searchable prop is eligible");
+            m.WriteU8(definition,5);
+            Require(ForgetMeNotMod.Highlight(m,rec)==0,"static Phantom Rod compartment remains excluded");
+        }
+        finally
+        {
+            for (uint i=0;i<records.Length;i++)m.WriteU8(rec+i,records[i]);
+            for (uint i=0;i<def.Length;i++)m.WriteU8(definition+i,def[i]);
+            m.WriteU8(area,oldArea);states.Clear();foreach(var p in previous)states.Add(p.Key,p.Value);
+            for(int i=0;i<doorIds.Length;i++)m.WriteU8(0x80175914+(uint)doorIds[i]*24,oldKinds[i]);
+            pickupField.SetValue(null,previousPickup);
+            c.RA=ra;c.A0=a0;c.S1=s1;
+        }
+    }
+}

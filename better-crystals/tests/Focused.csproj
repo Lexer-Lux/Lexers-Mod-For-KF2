@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>Kf2BetterCrystalsFocused</AssemblyName>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences><NoStdLib>true</NoStdLib>
+    <UseAppHost>false</UseAppHost><EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <AssemblySearchPaths>{HintPathFromItem};{RawFileName}</AssemblySearchPaths>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Probe.cs.txt" /><Compile Include="../BetterCrystals.cs" /><Compile Include="../NativeChoice.cs" />
+    <Reference Include="RecompOne.Runtime"><HintPath>$(RuntimeDir)/RecompOne.Runtime.dll</HintPath></Reference>
+    <Reference Include="MonoMod.RuntimeDetour"><HintPath>$(RuntimeDir)/MonoMod.RuntimeDetour.dll</HintPath></Reference>
+    <Reference Include="KingsField2"><HintPath>$(GameAssembly)</HintPath></Reference>
+    <Reference Include="$(ImplementationDir)/System.*.dll;$(ImplementationDir)/Microsoft.*.dll;$(ImplementationDir)/mscorlib.dll;$(ImplementationDir)/netstandard.dll;$(ImplementationDir)/WindowsBase.dll" Exclude="$(ImplementationDir)/*.Native.*.dll;$(ImplementationDir)/*.Native.dll"><Private>false</Private></Reference>
+  </ItemGroup>
+  <Target Name="RequirePrivateReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(GameAssembly)') Or !Exists('$(RuntimeDir)/RecompOne.Runtime.dll')" Text="Pass GameAssembly and RuntimeDir from the installed private release." />
+    <Error Condition="!Exists('$(ImplementationDir)/System.Private.CoreLib.dll')" Text="Pass ImplementationDir for .NET10 implementation references." />
+  </Target>
+  <Target Name="FocusedRuntimeConfig" AfterTargets="Build">
+    <WriteLinesToFile File="$(TargetDir)$(AssemblyName).runtimeconfig.json" Lines="{&quot;runtimeOptions&quot;:{&quot;tfm&quot;:&quot;net10.0&quot;,&quot;framework&quot;:{&quot;name&quot;:&quot;Microsoft.NETCore.App&quot;,&quot;version&quot;:&quot;10.0.0&quot;}}}" Overwrite="true" />
+  </Target>
+</Project>

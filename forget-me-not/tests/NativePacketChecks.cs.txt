@@ -1,0 +1,59 @@
+using System;
+using System.Linq;
+using System.Reflection;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Memory;
+
+// For the root's isolated loaded-game probe ONLY. No startup or player-file I/O.
+// Packet bookkeeping checks do not establish a visible glint in a rendered game.
+public static class NativePacketChecks
+{
+    static void Require(bool okay,string message) { if(!okay)throw new Exception(message); }
+    public static void Run(PSMemory m)
+    {
+        var type=AppDomain.CurrentDomain.GetAssemblies().Select(a=>a.GetType("Lexer.Kf2.ForgetMeNot.GlintSprites")).First(t=>t!=null)!;
+        var emit=type.GetMethod("Emit",BindingFlags.Static|BindingFlags.NonPublic)!;
+        var reset=type.GetMethod("Reset",BindingFlags.Static|BindingFlags.Public)!;
+        uint descriptor=m.ReadU32(0x8017E0A4),begin=m.ReadU32(descriptor+8),end=m.ReadU32(descriptor+4);
+        Require(end-begin>=1024,"isolated fixture needs a normal primitive arena");
+        reset.Invoke(null,null);
+        Func<int,int,float> plane=(_,_)=>2000f;
+        emit.Invoke(null,new object[]{m,160,120,2000f,3,false,1f,plane});
+        uint after=m.ReadU32(descriptor+8);
+        Require(after>begin&&after<=end&&(after-begin)%24==0,"bounded native pixel-sprite allocation");
+        Require(m.ReadU32(0x8006E914)==after,"both native primitive cursors must agree");
+        for(uint p=begin;p<after;p+=24)
+        {
+            uint cmd=m.ReadU32(p+4);
+            Require(GtePacketDepth.Peek(p+4,cmd,m.ReadU32(p+8),m.ReadU32(p+20),out var depth),"every visible pixel requires explicit depth metadata");
+            Require(depth.Z0==2000&&depth.Z1==2000&&depth.Z2==2000&&depth.Z3==2000,"pixel corners use anchor depth");
+            Require((cmd&0xFFFFFF)==((cmd>>16&255)*0x010101),"unchecked sprite is grayscale, not a model tint");
+        }
+        uint redStart=after;
+        emit.Invoke(null,new object[]{m,170,120,2000f,3,true,1f,plane});
+        after=m.ReadU32(descriptor+8);
+        Require(after>redStart,"locked sprite allocates pixels");
+        for(uint p=redStart;p<after;p+=24)
+        {
+            uint colour=m.ReadU32(p+4);
+            Require((colour&255)>(colour>>8&255)&&(colour&255)>(colour>>16&255),"locked glint is red");
+        }
+        uint slopeStart=after;
+        Func<int,int,float> slope=(x,y)=>2000+(x-180)*3+(y-120)*5;
+        emit.Invoke(null,new object[]{m,180,120,2000f,2,false,1f,slope});
+        after=m.ReadU32(descriptor+8);
+        Require(after>slopeStart,"surface-following sprite allocates pixels");
+        for(uint p=slopeStart;p<after;p+=24)
+        {
+            int x=(short)m.ReadU16(p+8),y=(short)m.ReadU16(p+10);
+            Require(GtePacketDepth.Peek(p+4,m.ReadU32(p+4),m.ReadU32(p+8),m.ReadU32(p+20),out var d),"sloped sprite has depth");
+            Require(d.Z0==slope(x,y)&&d.Z1==slope(x+1,y)&&d.Z2==slope(x,y+1)&&d.Z3==slope(x+1,y+1),
+                "all four pixel corners follow the surface, never a flat-depth fallback");
+        }
+        Func<int,int,float> missing=(_,_)=>float.NaN;
+        emit.Invoke(null,new object[]{m,190,120,2000f,2,false,1f,missing});
+        Require(m.ReadU32(descriptor+8)==after,"missing surface corners emit no floating pixels");
+        reset.Invoke(null,null);
+        for(uint p=begin;p<after;p+=24)Require(GtePacketDepth.Slot(p).Cmd==0,"disable/frame reset must clear owned depth hints");
+    }
+}

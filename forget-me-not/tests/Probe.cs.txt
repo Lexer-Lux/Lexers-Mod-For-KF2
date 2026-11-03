@@ -1,0 +1,65 @@
+using System;
+using System.IO;
+using System.Reflection;
+using System.Runtime.Loader;
+using Lexer.Kf2.ForgetMeNot;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Config;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+// Never calls Entry, game initialization, a disc reader, a window or a game loop.
+public static class Probe
+{
+    public static void Main(string[] args)
+    {
+        AssemblyLoadContext.Default.Resolving+=(_,name)=>File.Exists(Path.Combine(args[0],name.Name+".dll"))
+            ?AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(args[0],name.Name+".dll")):null;
+        Runtime.Headless=true;ConfigManager.Load();ConfigManager.Game.Muted=true;ConfigManager.Game.MasterVolume=0;
+        using var silence=new SilenceGuard();
+        GeometryChecks.Main();
+        Console.WriteLine("PASS: geometry: door hinge, nearest surface, backface, hollow frame, full coordinates, degenerate mesh");
+        var m=new PSMemory();var c=new CpuContext{SP=0x801FFFF0};var mod=new ForgetMeNotMod();mod.OnLoad();
+        StateChecks.Run(c,m);
+        Console.WriteLine("PASS: states: white, locked red, opened-unclaimed white, refused retained, taken clear, empty clear, ordinary door, illusory excluded");
+        const uint descriptor=0x80070000,buffer=0x80080000,table=0x800B0000;
+        m.WriteU32(0x8017E0A4,descriptor);m.WriteU32(descriptor,buffer);m.WriteU32(descriptor+4,buffer+0x20000);
+        m.WriteU32(descriptor+8,buffer);m.WriteU32(0x8006E914,buffer);m.WriteU32(0x8018E0A8,table);
+        GtePacketDepth.SetRange(buffer,0x20000);GtePacketDepth.Enabled=true;GteDepth.ZBuffer=true;
+        if(!GtePacketDepth.Active)throw new Exception("private packet-depth fixture did not activate");
+        NativePacketChecks.Run(m);
+        Console.WriteLine("PASS: packets: bounded allocation, shared cursors, explicit corner depth, white/red, owned metadata cleanup");
+        uint at=m.ReadU32(descriptor+8);
+        GteDepth.ZBuffer=false;ForgetMeNotMod.Glint(c,m);
+        GlintWithoutDepth();
+        void GlintWithoutDepth()
+        {
+            var sprites=typeof(ForgetMeNotMod).Assembly.GetType("Lexer.Kf2.ForgetMeNot.GlintSprites")!;
+            sprites.GetMethod("Draw")!.Invoke(null,[c,m,0x80177714u,(byte)1]);
+            if(m.ReadU32(descriptor+8)!=at)throw new Exception("Z-buffer-off path emitted pixels");
+            GteDepth.ZBuffer=true;GtePacketDepth.Enabled=false;
+            sprites.GetMethod("Draw")!.Invoke(null,[c,m,0x80177714u,(byte)1]);
+            if(m.ReadU32(descriptor+8)!=at)throw new Exception("unsupported packet-depth path emitted pixels");
+            Console.WriteLine("PASS: depth disabled/unsupported paths omit glints");
+        }
+        mod.OnUnload();
+        Console.WriteLine("Forget Me Not focused checks passed; no rendered acceptance claimed.");
+    }
+}
+
+sealed class SilenceGuard:IDisposable
+{
+    static void Check()
+    {
+        if(!Runtime.Headless||!ConfigManager.Game.Muted||ConfigManager.Game.MasterVolume!=0)
+            throw new Exception("Headless/mute guard failed");
+        var type=typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+        foreach(string name in new[]{"_alc","_al","_mixerThread"})
+            if(type.GetField(name,BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!=null)
+                throw new Exception("Audio guard failed: "+name);
+        if((uint)type.GetField("_source",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)! !=0)
+            throw new Exception("Audio guard failed: source");
+    }
+    public SilenceGuard(){Check();typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!.GetMethod("Initialize")!.Invoke(null,null);Check();Console.WriteLine("PASS: audio remained device/context/mixer null, source zero");}
+    public void Dispose(){Check();Console.WriteLine("PASS: headless/muted/master zero and audio uninitialized after checks");}
+}

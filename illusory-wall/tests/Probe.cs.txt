@@ -1,0 +1,130 @@
+using System.Reflection;
+using Lexer.Kf2.IllusoryWall;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+using Game = Recompiled.KingsField2_game;
+
+// Blank private RAM only: never call Entry, Initialize, a disc, save, window or input.
+Runtime.Headless = true; Gpu.NoRaster = true;
+RecompOne.Runtime.Config.ConfigManager.Game.Muted = true;
+RecompOne.Runtime.Config.ConfigManager.Game.MasterVolume = 0;
+void AssertSilent()
+{
+    var audio = typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+    Check(new[] { "_alc", "_al", "_mixerThread" }.All(n => audio.GetField(n, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null) == null)
+        && (uint)audio.GetField("_source", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)! == 0
+        && !RecompOne.Runtime.Host.GpuJobs.Claimed, "no audio or GPU host initialized");
+}
+void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }
+AssertSilent();
+var m = new PSMemory(); var c = new CpuContext { SP = 0x801FF000 };
+Runtime.SetContext(c, m);
+const uint Objects = 0x80177714, Definitions = 0x80175914, Pattern = 0x8006886C, Map = 0x801C8484;
+uint Record(int i) => Objects + (uint)i * 0x44;
+uint Cell(int x, int z, int half = 0) => Map + (uint)(z * 800 + x * 10 + half * 5);
+for (int i = 0; i < 396; i++) m.WriteU16(Record(i) + 6, 255);
+// Minimal mathematical endpoints for native rsin/rcos; no copied executable data.
+m.WriteU16(0x80069B88, 0); m.WriteU16(0x8006A386, 4096);
+var mod = new IllusoryWallMod(); mod.OnLoad();
+var type = typeof(IllusoryWallMod);
+void Set(string field, object value) => type.GetField(field, BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, value);
+bool Flag(string field) => (bool)type.GetField(field, BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+Check(Flag("_onUse") && !Flag("_onAttack") && !Flag("_walkThrough"), "native-preserving defaults: use on, attack/walk off");
+void Wall(int slot, ushort id = 0x82, byte kind = 2, byte behavior = 2)
+{
+    uint rec = Record(slot);
+    m.WriteU16(rec + 6, id); m.WriteU8(rec + 4, behavior); m.WriteU8(rec, 1);
+    m.WriteU8(Definitions + (uint)id * 24, kind); m.WriteU16(rec + 8, 0); m.WriteU8(rec + 0x38, 255);
+    m.WriteU32(rec + 0x14, 10 * 2048 + 1024); m.WriteU32(rec + 0x1C, 10 * 2048 + 1024);
+    m.WriteU32(rec + 0x18, unchecked((uint)-4000)); m.WriteU16(rec + 0x26, 0);
+}
+Wall(0);
+Check(IllusoryWallMod.Hidden(m, 0), "known native wall-door identity");
+Wall(1,0xCD); Check(IllusoryWallMod.Hidden(m,1),"native-rendered CD wall variant included");
+foreach (var candidate in new[] { (0x84,2,2), (0x89,2,2), (0x81,3,3), (0x83,5,5), (0xE6,14,255), (0x82,2,255) })
+{
+    Wall(1, (ushort)candidate.Item1, (byte)candidate.Item2, (byte)candidate.Item3);
+    Check(!IllusoryWallMod.Hidden(m, 1), "ordinary/unconfirmed/container/savepoint/frozen excluded: " + candidate);
+}
+m.WriteU16(Record(1) + 6, 255);
+Check(!IllusoryWallMod.Hidden(m, -1) && !IllusoryWallMod.Hidden(m, 396), "record bounds");
+// Synthetic pattern exercises both halves and optional model fields. Native
+// func35CC8 consumes the same layout; production bytes are never bundled here.
+for (uint i = 0; i < 30; i++) m.WriteU8(Pattern + i, 255);
+byte[] pattern = { 1, 2, 30, 31, 60, 61, 40, 41, 0, 0 };
+for (uint i = 0; i < pattern.Length; i++) m.WriteU8(Pattern + i, pattern[i]);
+void Closed()
+{
+    m.WriteU8(Cell(10,10) + 3, 1); m.WriteU8(Cell(10,10,1) + 3, 2);
+    m.WriteU8(Cell(10,10), 30); m.WriteU8(Cell(10,10,1), 31);
+}
+bool IsClosed() => m.ReadU8(Cell(10,10)+3)==1 && m.ReadU8(Cell(10,10,1)+3)==2
+    && m.ReadU8(Cell(10,10))==30 && m.ReadU8(Cell(10,10,1))==31;
+bool IsOpen() => m.ReadU8(Cell(10,10)+3)==60 && m.ReadU8(Cell(10,10,1)+3)==61
+    && m.ReadU8(Cell(10,10))==40 && m.ReadU8(Cell(10,10,1))==41;
+Closed();
+// Compare the native open-footprint routine itself, without any loop/renderer.
+c.A0 = 1; c.A1 = m.ReadU32(Record(0)+0x14); c.A2 = m.ReadU32(Record(0)+0x1C); c.A3 = 0;
+m.WriteU32(c.SP+0x10, Pattern); m.WriteU32(c.SP+0x14, 1); m.WriteU32(c.SP+0x18, 255);
+Game.func_80035CC8(c,m);
+Check(IsOpen(), "actual native opened pattern applies both half shapes/models");
+Closed(); m.WriteU16(0x80199428, 100);
+c.A0 = 10*2048+1024; c.A1 = unchecked((uint)-4000); c.A2 = 10*2048+1024;
+int calls = 0;
+c.RA=0x80028150;
+IllusoryWallMod.Collision((cc,mm) => { calls++; Check(IsClosed(), "default collision unchanged"); },c,m);
+Set("_walkThrough", true);
+c.RA=0;
+IllusoryWallMod.Collision((cc,mm) => Check(IsClosed(), "non-movement collision unchanged"),c,m);
+c.RA=0x80028150;
+IllusoryWallMod.Collision((cc,mm) => { Check(IsOpen(), "temporary native footprint inside movement collision"); cc.V0=123; },c,m);
+Check(IsClosed() && c.V0==123, "native result and original map restored after collision");
+foreach(uint floorCall in new uint[]{0x800285A0,0x800286FC,0x80028848,0x800289D8})
+{
+    c.RA=floorCall;
+    IllusoryWallMod.Collision((cc,mm)=>Check(IsOpen(),"native player floor/step query uses opened footprint"),c,m);
+    Check(IsClosed(),"floor/step query restores original map before draw");
+}
+c.RA=0x80028150;
+try
+{
+    IllusoryWallMod.Collision((cc,mm) => { Check(IsOpen(), "open before injected native failure"); throw new InvalidOperationException("owned fixture"); },c,m);
+}
+catch (InvalidOperationException) { }
+Check(IsClosed(), "finally restores map after exception");
+IllusoryWallMod.Collision((cc,mm) => mm.WriteU8(Cell(10,10)+3,99),c,m);
+Check(m.ReadU8(Cell(10,10)+3)==99, "restore does not overwrite an unrelated later change");
+Closed();
+// Real hit-sample callsite only; blocked/absent swings and dead players inert.
+Set("_onAttack",true); c.RA=0; IllusoryWallMod.WeaponSample(c,m);
+Check(m.ReadU16(Record(0)+8)==0, "button/non-hit callsite cannot open");
+c.RA=0x80027BE0; IllusoryWallMod.WeaponSample(c,m);
+Check(m.ReadU16(Record(0)+8)==1, "actual weapon hit sample enters native opening state");
+m.WriteU16(Record(0)+8,0); m.WriteU8(Record(0)+0x38,2); IllusoryWallMod.WeaponSample(c,m);
+Check(m.ReadU16(Record(0)+8)==0, "attack does not bypass native lock");
+m.WriteU8(Record(0)+0x38,255); m.WriteU16(0x80199428,0); IllusoryWallMod.WeaponSample(c,m);
+Check(m.ReadU16(Record(0)+8)==0, "dead player cannot attack-open");
+m.WriteU16(0x80199428,100);
+// Use filtering retries the real native scanner past the rejected wall. Other
+// records are empty, so this cannot enter a message/save or render loop.
+Set("_onUse",false); c.RA=0x80048B74; c.A0=0; c.A1=0x801FF800; c.A2=800; c.A3=2500;
+IllusoryWallMod.BeforeUseQuery(c,m); c.V0=0; IllusoryWallMod.AfterUseQuery(c,m);
+Check(c.V0==uint.MaxValue, "use-off rejects only hidden candidate and native scan exhausts");
+Set("_onUse",true); IllusoryWallMod.BeforeUseQuery(c,m); c.V0=0; IllusoryWallMod.AfterUseQuery(c,m);
+Check(c.V0==0, "use-on leaves native selected candidate unchanged");
+// Disable during an owned query must restore before returning, including errors.
+c.A0=10*2048+1024; c.A1=unchecked((uint)-4000); c.A2=10*2048+1024;
+c.RA=0x800283BC;
+IllusoryWallMod.Collision((cc,mm) => { Check(IsOpen(), "owned footprint before disable"); mod.OnUnload(); Check(IsClosed(), "disable restores active footprint immediately"); },c,m);
+Check(IsClosed(), "disable leaves map untouched");
+mod.OnLoad(); Set("_walkThrough",true);
+c.RA=0x80028080;
+IllusoryWallMod.Collision((cc,mm) =>
+{
+    Check(IsOpen(), "owned footprint before area identity change");
+    mm.WriteU8(0x8017E060,1); IllusoryWallMod.Loaded(cc,mm);
+},c,m);
+Check(IsOpen(), "cleanup never copies old-area collision into a newly loaded area");
+mod.OnUnload();
+AssertSilent(); Console.WriteLine("PASS: illusory wall focused native fixture (verified 0x82/CD wall variants)");

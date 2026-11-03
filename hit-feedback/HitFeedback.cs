@@ -5,7 +5,6 @@ using Kf2;
 using RecompOne.Runtime;
 using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Events;
-using RecompOne.Runtime.Hardware;
 using RecompOne.Runtime.Memory;
 using RecompOne.Runtime.Modding;
 
@@ -13,37 +12,56 @@ namespace Lexer.Kf2.HitFeedback;
 
 public sealed class HitFeedbackMod : IMod
 {
-    const uint Creatures = 0x8016C544, Definitions = 0x80172624, LightColour = 0x8006E604;
+    const uint Creatures = 0x8016C544, Definitions = 0x80172624;
     const int Count = 200, Stride = 0x7C;
     const string DurationSetting = "lexer.kf2.hitfeedback.maximumseconds";
-    static float _maximumSeconds;
-    static readonly long[] Until = new long[Count];
+    const string RedSetting = "lexer.kf2.hitfeedback.redintensity";
+    static float _maximumSeconds, _redPercent;
+    readonly record struct Flash(long Started, long Ends, float MissingHp);
+    static readonly Flash[] Flashes = new Flash[Count];
     static readonly Stack<(uint Record, int Before, int Maximum)> Hits = new();
-    static readonly uint[] Colours = new uint[8];
-    static uint _rgbc, _gteRgbc;
-    static bool _tinted;
+    struct DrawMark
+    {
+        public int Serial, Main, Mirror;
+        public float Strength;
+    }
+    static readonly Stack<DrawMark> Draws = new();
+    static bool _loaded;
 
     public void OnLoad()
     {
         float saved = Runtime.View.GetFloat(DurationSetting, 0.6f);
         _maximumSeconds = float.IsFinite(saved) ? Math.Clamp(saved, 0f, 5f) : 0.6f;
+        saved = Runtime.View.GetFloat(RedSetting, 50f);
+        _redPercent = float.IsFinite(saved) ? Math.Clamp(saved, 0f, 100f) : 50f;
         Clear();
+        _loaded = true;
         Event.AddListener<OverlayLoadedEvent>(Overlay);
     }
 
     public void OnUnload()
     {
+        _loaded = false;
         Event.RemoveListener<OverlayLoadedEvent>(Overlay);
         Clear();
     }
 
     public void DrawSettings()
     {
-        if (ImGui.SliderFloat("Maximum flash duration (seconds)", ref _maximumSeconds, 0f, 5f, "%.2f"))
+        if (ImGui.SliderFloat("Maximum flash duration (seconds)", ref _maximumSeconds, 0f, 5f, "%.2f", ImGuiSliderFlags.AlwaysClamp))
         {
+            _maximumSeconds = float.IsFinite(_maximumSeconds) ? Math.Clamp(_maximumSeconds, 0f, 5f) : 0.6f;
             Runtime.View.SetFloat(DurationSetting, _maximumSeconds);
             Runtime.SaveView();
         }
+        if (ImGui.SliderFloat("Red intensity (%)", ref _redPercent, 0f, 100f, "%.0f%%", ImGuiSliderFlags.AlwaysClamp))
+        {
+            _redPercent = float.IsFinite(_redPercent) ? Math.Clamp(_redPercent, 0f, 100f) : 50f;
+            Runtime.View.SetFloat(RedSetting, _redPercent);
+            Runtime.SaveView();
+        }
+        if (!RetainedScene.MainView || !RetainedScene.Supported)
+            ImGui.TextDisabled("Enable GPU geometry and model meshes for Hit Feedback.");
     }
 
     static int Slot(uint record) => record >= Creatures && record < Creatures + Count * Stride
@@ -59,9 +77,9 @@ public sealed class HitFeedbackMod : IMod
 
     static void Clear()
     {
-        if (Runtime.Mem != null) RestoreLighting(Runtime.Mem);
-        Array.Clear(Until);
+        Array.Clear(Flashes);
         Hits.Clear();
+        Draws.Clear();
     }
 
     static void Overlay(OverlayLoadedEvent e) => Clear();
@@ -83,10 +101,16 @@ public sealed class HitFeedbackMod : IMod
         var hit = Hits.Pop();
         int slot = Slot(hit.Record);
         if (slot < 0 || hit.Maximum <= 0) return;
-        int lost = hit.Before - m.ReadU16(hit.Record + 0x1A);
+        int remaining = m.ReadU16(hit.Record + 0x1A);
+        int lost = hit.Before - remaining;
         if (lost <= 0) return;
         long duration = (long)(Math.Clamp((double)lost / hit.Maximum, 0, 1) * _maximumSeconds * 1000);
-        Until[slot] = Math.Max(Until[slot], Environment.TickCount64 + duration);
+        long now = Environment.TickCount64;
+        // A new hit interrupts the previous pulse: no additive intensity or
+        // inherited lifetime. Each pulse obeys this hit's own HP formulas.
+        Flashes[slot] = duration > 0
+            ? new Flash(now, now + duration, Math.Clamp(1f - (float)remaining / hit.Maximum, 0f, 1f))
+            : default;
     }
 
     // The spawn routine copies this definition's +0x1A maximum into the creature.
@@ -94,38 +118,81 @@ public sealed class HitFeedbackMod : IMod
     public static void Spawn(CpuContext c, IMemory m)
     {
         int slot = Slot(c.A0);
-        if (slot >= 0) Until[slot] = 0;
+        if (slot >= 0) Flashes[slot] = default;
     }
 
     [PostHook("game", Address = 0x8004A040)]
+    [PreHook("game", Address = 0x8002A264)] // native player death
+    [PreHook("game", Address = 0x80025A94)] // native full status reset/respawn
     public static void Loaded(CpuContext c, IMemory m) => Clear();
 
-    // Every model submit resolves its model at this call site after installing its
-    // lighting and before building GPU instances or the original polygon packets.
-    [PostHook("game", Address = 0x80034834)]
-    public static void Tint(CpuContext c, IMemory m)
+    static float Intensity(int slot, long now)
     {
-        if (_tinted || c.RA != 0x800329A0 || ModelWalk.SubmitKind != ModelKind.Creature) return;
-        int slot = Slot(DamageRecord(m, ModelWalk.SubmitRecord));
-        if (slot < 0 || Until[slot] <= Environment.TickCount64) return;
-        for (int i = 0; i < Colours.Length; i++) Colours[i] = Gte.ReadControl(13 + i);
-        _rgbc = m.ReadU32(LightColour);
-        _gteRgbc = Gte.Read(6);
-        _tinted = true;
-        Gte.WriteControl(13, 4096);
-        for (int i = 14; i <= 20; i++) Gte.WriteControl(i, 0);
-        m.WriteU32(LightColour, (_rgbc & 0xFF000000u) | 255u);
+        Flash flash = Flashes[slot];
+        if (_redPercent <= 0 || _maximumSeconds <= 0 || now >= flash.Ends || flash.Ends <= flash.Started) return 0;
+        float remaining = Math.Clamp((float)(flash.Ends - now) / (flash.Ends - flash.Started), 0f, 1f);
+        return flash.MissingHp * (_redPercent / 100f) * remaining;
+    }
+
+    // Snapshot only this draw's newly captured instances. An inactive mark still
+    // balances nested callbacks and prevents an outer creature's pulse coloring
+    // an unrelated nested object, menu preview or first-person arm.
+    [PreHook("game", Address = 0x80032588)]
+    public static void BeforeModel(CpuContext c, IMemory m)
+    {
+        if (Draws.Count != 0 && Draws.Peek().Serial != RetainedScene.Serial) Draws.Clear();
+        if (Draws.Count != 0)
+        {
+            var parent = Draws.Pop();
+            Flush(ref parent);
+            Draws.Push(parent);
+        }
+        int serial = RetainedScene.Serial;
+        var frame = RetainedScene.Find(serial);
+        int slot = _loaded && RetainedScene.MainView && RetainedScene.Supported && (ModelWalk.InWalk || PlanarWalk.Replaying)
+            && ModelWalk.SubmitKind == ModelKind.Creature ? Slot(DamageRecord(m, ModelWalk.SubmitRecord)) : -1;
+        Draws.Push(new DrawMark
+        {
+            Serial = frame == null ? -1 : serial,
+            Main = frame?.Instances.Count ?? 0, Mirror = frame?.MirrorInstances.Count ?? 0,
+            Strength = slot < 0 ? 0 : Intensity(slot, Environment.TickCount64),
+        });
     }
 
     [PostHook("game", Address = 0x80032588)]
-    public static void Restore(CpuContext c, IMemory m) => RestoreLighting(m);
-
-    static void RestoreLighting(IMemory m)
+    public static void AfterModel(CpuContext c, IMemory m)
     {
-        if (!_tinted) return;
-        for (int i = 0; i < Colours.Length; i++) Gte.WriteControl(13 + i, Colours[i]);
-        m.WriteU32(LightColour, _rgbc);
-        Gte.Write(6, _gteRgbc);
-        _tinted = false;
+        if (Draws.Count == 0) return;
+        var own = Draws.Pop();
+        Flush(ref own);
+        if (Draws.Count == 0) return;
+        // The child's complete ranges belong to the child, including when inert.
+        var parent = Draws.Pop();
+        var frame = RetainedScene.Find(parent.Serial);
+        if (frame != null && parent.Serial == RetainedScene.Serial)
+        { parent.Main = frame.Instances.Count; parent.Mirror = frame.MirrorInstances.Count; }
+        Draws.Push(parent);
+    }
+
+    static void Flush(ref DrawMark mark)
+    {
+        if (mark.Serial != RetainedScene.Serial) return;
+        var frame = RetainedScene.Find(mark.Serial);
+        if (frame == null) return;
+        Mix(frame.Instances, mark.Main, mark.Strength);
+        Mix(frame.MirrorInstances, mark.Mirror, mark.Strength);
+        mark.Main = frame.Instances.Count; mark.Mirror = frame.MirrorInstances.Count;
+    }
+
+    static void Mix(List<RetainedScene.ModelInstance> instances, int first, float strength)
+    {
+        if (!_loaded || _redPercent <= 0 || _maximumSeconds <= 0 || strength <= 0 || !float.IsFinite(strength)) return;
+        for (int i = Math.Max(first, 0); i < instances.Count; i++)
+        {
+            var instance = instances[i];
+            instance.ColourMixRgb = 0x0000FF;
+            instance.ColourMix = Math.Clamp(strength, 0f, 1f);
+            instances[i] = instance;
+        }
     }
 }

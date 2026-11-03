@@ -10,12 +10,14 @@ namespace Lexer.Kf2.BetterSprint;
 public sealed class BetterSprintMod : IMod
 {
     const string Setting = "lexer.kf2.bettersprint.drain";
+    const string FreeMagicSetting = "lexer.kf2.bettersprint.freemagic";
     const uint Power = 0x8019942E, MagicPower = 0x80199432, RunState = 0x8019941F;
     const uint Pad = 0x80199554, LastPad = 0x80199556, UseMask = 0x8006E568;
     const uint X = 0x801994EC, Z = 0x801994F4;
     const int FullPower = 5000, VanillaDrain = 500;
     static float _rate = 150f, _fraction;
     static bool _player, _inside, _eligible, _pending;
+    static bool _freeMagic = true, _exhausted;
     static uint _x, _z;
     static ushort _physical, _magic, _mask, _now, _last;
 
@@ -23,6 +25,7 @@ public sealed class BetterSprintMod : IMod
     {
         float value = Runtime.View.GetFloat(Setting, 150f);
         _rate = float.IsFinite(value) ? Math.Clamp(value, 0f, 300f) : 150f;
+        _freeMagic = Runtime.View.GetBool(FreeMagicSetting, true);
         Reset();
     }
 
@@ -34,26 +37,50 @@ public sealed class BetterSprintMod : IMod
 
     public void DrawSettings()
     {
-        if (ImGui.SliderFloat("Stamina drain (%/second)", ref _rate, 0f, 300f, "%.1f%%"))
+        if (ImGui.SliderFloat("Stamina drain (%/second)", ref _rate, 0f, 300f, "%.1f%%", ImGuiSliderFlags.AlwaysClamp))
         {
+            _rate = float.IsFinite(_rate) ? Math.Clamp(_rate, 0f, 300f) : 150f;
             Runtime.View.SetFloat(Setting, _rate);
+            Runtime.SaveView();
+        }
+        if (ImGui.Checkbox("Running consumes no magic power", ref _freeMagic))
+        {
+            Runtime.View.SetBool(FreeMagicSetting, _freeMagic);
             Runtime.SaveView();
         }
     }
 
-    static void Reset()
+    static void Reset(bool requireRelease = false)
     {
         _player = _inside = _eligible = _pending = false;
         _mask = 0;
         _fraction = 0;
+        _exhausted = requireRelease;
     }
 
     [PostHook("game", Address = 0x8004A040)]
-    public static void Loaded(CpuContext c, IMemory m) => Reset();
+    [PreHook("game", Address = 0x8002A264)] // death
+    [PreHook("game", Address = 0x80025A94)] // native full status reset/respawn
+    public static void Loaded(CpuContext c, IMemory m)
+    {
+        RestoreInput(m);
+        Reset(true);
+    }
+
+    [PreHook("game", Address = 0x80022754)]
+    public static void Menu(CpuContext c, IMemory m)
+    {
+        RestoreInput(m);
+        _player = _inside = _eligible = _pending = false;
+        // A modal interruption must not release an exhausted held run button.
+        // Keep the latch and fractional charge until gameplay observes release.
+    }
 
     [PreHook("game", Address = 0x8002A550)]
     public static void BeforePlayer(CpuContext c, IMemory m)
     {
+        if (m.ReadU16(0x80199428) == 0 || m.ReadU8(0x801994E1) == 0x11)
+        { Loaded(c, m); return; }
         StopEmptyRun(m);
         _x = m.ReadU32(X); _z = m.ReadU32(Z);
         _player = true;
@@ -68,16 +95,15 @@ public sealed class BetterSprintMod : IMod
         _now = m.ReadU16(Pad); _last = m.ReadU16(LastPad);
         ushort mask = (ushort)m.ReadU32(UseMask);
         bool held = (_now & mask) != 0 && (_last & mask) != 0;
-        _eligible = _player && held && m.ReadU8(0x801994D8) != 50 && _physical != 0;
+        bool pressed = (_now & mask) != 0;
+        if (!pressed) _exhausted = false;
+        else if (_physical == 0) _exhausted = true;
+        _eligible = _player && held && !_exhausted && m.ReadU8(0x801994D8) != 50 && _physical != 0;
         _mask = 0;
         // Runs after the fork translates its separate Run binding into the native
         // action bit. Scope only that bit; Interact and all other bindings survive.
-        if (held && _physical == 0)
-        {
-            _mask = mask;
-            m.WriteU16(Pad, (ushort)(_now & ~mask));
-            m.WriteU16(LastPad, (ushort)(_last & ~mask));
-        }
+        if (held && _exhausted)
+            BlockRun(m, mask);
     }
 
     // Casting/quick item use precedes the run branch inside the native function.
@@ -88,7 +114,23 @@ public sealed class BetterSprintMod : IMod
     {
         if (!_inside) return;
         _physical = m.ReadU16(Power); _magic = m.ReadU16(MagicPower);
-        if (_physical == 0) _eligible = false;
+        if (_physical == 0)
+        {
+            _eligible = false; _exhausted = true;
+            ushort mask = (ushort)m.ReadU32(UseMask);
+            // An action may empty physical power after BeforeRun took its
+            // snapshot. Stop the later native run branch as well, rather than
+            // allowing it to remove magic power while physical power is empty.
+            if ((_now & mask) != 0 && (_last & mask) != 0) BlockRun(m, mask);
+        }
+    }
+
+    static void BlockRun(IMemory m, ushort mask)
+    {
+        _mask = mask;
+        m.WriteU16(Pad, (ushort)(m.ReadU16(Pad) & ~mask));
+        m.WriteU16(LastPad, (ushort)(m.ReadU16(LastPad) & ~mask));
+        StopEmptyRun(m);
     }
 
     [PostHook("game", Address = 0x8002957C)]
@@ -130,9 +172,11 @@ public sealed class BetterSprintMod : IMod
         _fraction = drain - cost;
         int left = Math.Max(0, m.ReadU16(Power) - cost);
         m.WriteU16(Power, (ushort)left);
-        m.WriteU16(MagicPower, (ushort)Math.Max(0, m.ReadU16(MagicPower) - cost));
+        if (!_freeMagic)
+            m.WriteU16(MagicPower, (ushort)Math.Max(0, m.ReadU16(MagicPower) - cost));
         if (left == 0)
         {
+            _exhausted = true;
             m.WriteU8(RunState, 40);
             StopEmptyRun(m);
         }
@@ -140,7 +184,7 @@ public sealed class BetterSprintMod : IMod
 
     static void StopEmptyRun(IMemory m)
     {
-        if (m.ReadU16(Power) != 0) return;
+        if (m.ReadU16(Power) != 0 && !_exhausted) return;
         // Stage 3 derives this tick's walk speed from the previous run latch and
         // ramp before reading Run. Remove carried positive sprint acceleration;
         // leave negative environmental slowdowns intact.

@@ -1,0 +1,87 @@
+using System.Reflection;
+using System.Runtime.Loader;
+using Lexer.Kf2.RedN;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Config;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Memory;
+
+AssemblyLoadContext.Default.Resolving+=(_,name)=>File.Exists(Path.Combine(args[0],name.Name+".dll"))?AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(args[0],name.Name+".dll")):null;
+Runtime.Headless=true;ConfigManager.Load();ConfigManager.Game.Muted=true;ConfigManager.Game.MasterVolume=0;
+using var silence=new SilenceGuard();
+var mod=new RedNMod();var m=new PSMemory(4*1024*1024);var c=new CpuContext();
+const uint Desc=0x8017E08C,Begin=0x80200100;
+void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
+void Prepare()
+{
+    mod.OnLoad();m.WriteU32(0x8017E0A4,Desc);m.WriteU32(Desc,Begin);m.WriteU32(Desc+4,Begin+65536);m.WriteU32(Desc+8,Begin);
+    m.WriteU8(0x80067774,1);m.WriteU16(0x80067778,0);
+}
+void Packet(uint packet,int u,int v,ushort clut=0x7B40,ushort page=9,byte command=0x3C)
+{
+    m.WriteU32(packet,0x0CFFFFFF);
+    for(uint i=0;i<4;i++)
+    {
+        m.WriteU32(packet+4+i*12,(i==0?(uint)command<<24:0xAB000000)|0x00706050+i);
+        m.WriteU32(packet+8+i*12,0x00200040+i);
+        m.WriteU16(packet+12+i*12,(ushort)((u+(i%2)*16)|((v+(i/2)*16)<<8)));
+    }
+    m.WriteU16(packet+14,clut);m.WriteU16(packet+26,page);
+}
+byte[] SpanBytes(int length)=>m.Ram.Slice((int)(Begin&0x1FFFFFFF),length).ToArray();
+Prepare();RedNMod.BeforeHud(c,m);
+Packet(Begin,0,128);Packet(Begin+52,64,128);Packet(Begin+104,0,192);Packet(Begin+156,64,192);
+Packet(Begin+208,0,0);Packet(Begin+260,0,128,0x7BC0);Packet(Begin+312,0,128,0x7B40,8);Packet(Begin+364,0,128,0x7B40,9,0x3E);
+var before=SpanBytes(416);m.WriteU32(Desc+8,Begin+416);RedNMod.AfterHud(c,m);var after=SpanBytes(416);
+var expected=new HashSet<int>(new[]{5,6,17,18,29,30,41,42});
+Check(Enumerable.Range(0,416).Where(i=>before[i]!=after[i]).ToHashSet().SetEquals(expected),"only N's8green/blue bytes change; E/S/W, font, palette/page mismatch and overlay remain exact");
+Check(after[4]==before[4]&&after[7]==before[7],"N red lighting and native command survive");
+Prepare();RedNMod.BeforeHud(c,m);Packet(Begin,0,128);m.WriteU32(Desc+8,Begin+52);mod.OnUnload();before=SpanBytes(52);RedNMod.AfterHud(c,m);
+Check(before.SequenceEqual(SpanBytes(52)),"disable clears pending observation and restores native next HUD");
+Prepare();m.WriteU8(0x80067774,0);RedNMod.BeforeHud(c,m);Packet(Begin,0,128);m.WriteU32(Desc+8,Begin+52);before=SpanBytes(52);RedNMod.AfterHud(c,m);
+Check(before.SequenceEqual(SpanBytes(52)),"hidden compass untouched");
+foreach(string invalid in new[]{"zero-length","truncated","descriptor-change","more-than-four"})
+{
+    Prepare();RedNMod.BeforeHud(c,m);for(uint i=0;i<5;i++)Packet(Begin+i*52,0,128);
+    m.WriteU32(Desc+8,Begin+(invalid=="more-than-four"?260u:52u));
+    if(invalid=="zero-length")m.WriteU8(Begin+3,0);
+    if(invalid=="truncated")m.WriteU32(Desc+8,Begin+48);
+    if(invalid=="descriptor-change")m.WriteU32(0x8017E0A4,Desc+12);
+    before=SpanBytes(260);RedNMod.AfterHud(c,m);Check(before.SequenceEqual(SpanBytes(260)),invalid+" fails closed before any mutation");
+}
+if(args.Length>1)
+{
+    // Optional private existing RAM fixture, read only to inspect the original
+    // static compass asset. No game entry point or player save is loaded.
+    byte[] ram=File.ReadAllBytes(args[1]);
+    uint R32(uint a)=>BitConverter.ToUInt32(ram,(int)(a&0x1FFFFF));
+    ushort R16(uint a)=>BitConverter.ToUInt16(ram,(int)(a&0x1FFFFF));
+    uint bank=R32(0x8018E1A0),header=bank+R32(bank+8),mesh=header+12;
+    uint face=header+12+R32(mesh+16),count=R32(mesh+20);
+    Check(count==48&&R32(mesh+4)==26,"actual private fixture has original compass48faces/26vertices");
+    var matched=new List<int>();
+    for(int i=0;i<count;i++)
+    {
+        uint word=R32(face),f=face+4;face=f+((word>>6)&0x3FC);
+        if((word>>24)!=0x3C)continue;
+        Prepare();RedNMod.BeforeHud(c,m);Packet(Begin,0,128);
+        for(uint j=0;j<4;j++)m.WriteU16(Begin+12+j*12,R16(f+j*4));
+        m.WriteU16(Begin+14,R16(f+2));m.WriteU16(Begin+26,R16(f+6));m.WriteU32(Desc+8,Begin+52);
+        before=SpanBytes(52);RedNMod.AfterHud(c,m);if(!before.SequenceEqual(SpanBytes(52)))matched.Add(i);
+    }
+    Check(matched.SequenceEqual(new[]{5,6,9,10}),"actual original mesh UVs select exactly N faces5,6,9,10");
+}
+Console.WriteLine("Red N focused packet checks passed; GPU appearance not evaluated.");
+
+sealed class SilenceGuard:IDisposable
+{
+    static void Check()
+    {
+        var type=typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+        foreach(string name in new[]{"_alc","_al","_mixerThread"})
+            if(type.GetField(name,BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)!=null)throw new Exception("Audio active: "+name);
+        if((uint)type.GetField("_source",BindingFlags.Static|BindingFlags.NonPublic)!.GetValue(null)! != 0)throw new Exception("Audio source active");
+    }
+    public SilenceGuard(){Check();typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!.GetMethod("Initialize")!.Invoke(null,null);Check();Console.WriteLine("PASS: headless audio preflight silent");}
+    public void Dispose(){Check();Console.WriteLine("PASS: audio remained uninitialized");}
+}

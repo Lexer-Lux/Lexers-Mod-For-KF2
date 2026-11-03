@@ -1,7 +1,7 @@
 {
   "id": "lexer.kf2.forget-me-not",
   "name": "Forget Me Not",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Lexer",
   "description": "White glints for unchecked containers and real doors; red after a locked attempt.",
   "enabled": true

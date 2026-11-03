@@ -1,0 +1,144 @@
+using System.Reflection;
+using Kf2;
+using Lexer.Kf2.XpBar;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Hle;
+using RecompOne.Runtime.Memory;
+
+// This executable never invokes a game entry point, opens a disc/card, starts
+// graphics/audio/input or writes player preferences. All RAM here is blank.
+Runtime.Headless = true;
+Gpu.NoRaster = true;
+RecompOne.Runtime.Config.ConfigManager.Game.Muted = true;
+RecompOne.Runtime.Config.ConfigManager.Game.MasterVolume = 0;
+void AssertSilent()
+{
+    var audio = typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+    Require(new[] { "_alc", "_al", "_mixerThread" }.All(n => audio.GetField(n, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null) == null)
+            && (uint)audio.GetField("_source", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)! == 0,
+        "no audio API, output source or mixer thread");
+    Require(!RecompOne.Runtime.Host.GpuJobs.Claimed, "no graphics host thread started");
+}
+AssertSilent();
+var memory = new PSMemory();
+var cpu = new CpuContext();
+Runtime.SetContext(cpu, memory);
+var mod = new XpBarMod();
+const uint Experience = 0x80199414, Next = 0x80199418, Level = 0x8019941C, LevelTable = 0x8007682C;
+const uint Descriptor = 0x801E0000, Table = 0x801E0100, Buffer = 0x801E1000;
+const uint ActiveDescriptor = 0x8017E0A4, OrderingTable = 0x8018E0A8, NativeCursor = 0x8006E914;
+const string HeightSetting = "lexer.kf2.xpbar.height";
+void Require(bool condition, string name)
+{
+    if (!condition) throw new Exception("FAIL: " + name);
+    Console.WriteLine("PASS: " + name);
+}
+void Near(double actual, double expected, string name) => Require(Math.Abs(actual - expected) < 0.000001, name);
+void Character(byte level, uint xp, uint next)
+{
+    memory.WriteU8(Level, level); memory.WriteU32(Experience, xp); memory.WriteU32(Next, next);
+}
+void ResetBuffer(uint bytes = 48, uint cursor = Buffer)
+{
+    memory.WriteU32(ActiveDescriptor, Descriptor); memory.WriteU32(OrderingTable, Table);
+    memory.WriteU32(Descriptor + 4, cursor + bytes); memory.WriteU32(Descriptor + 8, cursor);
+    memory.WriteU32(Table + 4, 0x00FFFFFF); memory.WriteU32(NativeCursor, 0xAABBCCDD);
+    for (uint i = 0; i < 64; i += 4) memory.WriteU32(Buffer + i, 0xDEADBEEF);
+}
+void ReadyHud()
+{
+    memory.WriteU16(0x80199426, 100); memory.WriteU16(0x80199428, 50);
+    memory.WriteU8(0x801994DD, 1);
+}
+void Height(int value)
+{
+    Runtime.View.SetInt(HeightSetting, value); mod.OnLoad();
+}
+void CheckPacket(uint packet, int left, int right, int top, string label)
+{
+    Require((memory.ReadU32(packet) >> 24) == 5 && (memory.ReadU32(packet + 4) >> 24) == 0x28,
+        label + " uses a valid native POLY_F4 allocation");
+    Require((short)memory.ReadU16(packet + 8) == left && (short)memory.ReadU16(packet + 12) == right &&
+            (short)memory.ReadU16(packet + 16) == left && (short)memory.ReadU16(packet + 20) == right,
+        label + " spans the expected horizontal extent");
+    Require(memory.ReadU16(packet + 10) == top && memory.ReadU16(packet + 14) == top &&
+            memory.ReadU16(packet + 18) == 240 && memory.ReadU16(packet + 22) == 240,
+        label + " stays flush against the absolute bottom");
+}
+void Rejects(Action setup, string label)
+{
+    ReadyHud(); Character(1, 25, 50); ResetBuffer(); setup();
+    uint cursor = memory.ReadU32(Descriptor + 8), native = memory.ReadU32(NativeCursor);
+    XpBarMod.Draw(cpu, memory);
+    Require(memory.ReadU32(Descriptor + 8) == cursor && memory.ReadU32(NativeCursor) == native &&
+            memory.ReadU32(Buffer) == 0xDEADBEEF, label + " leaves packet data and both cursors unchanged");
+}
+
+Display.SourceAspect = 4f / 3f;
+Display.WideAspect = 4f / 3f;
+Runtime.View.Values.Remove(HeightSetting);
+mod.OnLoad(); ReadyHud(); Character(1, 25, 50); ResetBuffer();
+XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer + 24, 0, 320, 236, "Default four-pixel track");
+Require(memory.ReadU32(Descriptor + 8) == Buffer + 48 && memory.ReadU32(NativeCursor) == Buffer + 48,
+    "default bar advances both native cursors by exactly two packets");
+Require((memory.ReadU32(Table + 4) & 0x00FFFFFF) == ((Buffer + 24) & 0x00FFFFFF) &&
+        (memory.ReadU32(Buffer + 24) & 0x00FFFFFF) == (Buffer & 0x00FFFFFF) &&
+        (memory.ReadU32(Buffer) & 0x00FFFFFF) == 0x00FFFFFF,
+    "ordering-table links draw the track before its fill");
+Require(memory.ReadU32(Buffer + 48) == 0xDEADBEEF, "packet allocation does not overrun its exact capacity");
+Require(memory.ReadU8(Level) == 1 && memory.ReadU32(Experience) == 25 && memory.ReadU32(Next) == 50,
+    "drawing never changes character progress");
+
+foreach (var (aspect, label) in new[] { (4f / 3f, "4:3"), (16f / 9f, "16:9"), (21f / 9f, "21:9") })
+foreach (int height in new[] { 1, 4, 16 })
+{
+    Display.WideAspect = aspect; Height(height); ReadyHud(); Character(1, 25, 50); ResetBuffer();
+    XpBarMod.Draw(cpu, memory);
+    int margin = Display.WideMargin(320), width = 320 + 2 * margin;
+    CheckPacket(Buffer + 24, -margin, 320 + margin, 240 - height, label + " height " + height + " track");
+    CheckPacket(Buffer, -margin, -margin + width / 2, 240 - height, label + " height " + height + " half-progress fill");
+}
+
+Display.WideAspect = 4f / 3f;
+Height(0); ReadyHud(); Character(1, 25, 50); ResetBuffer(); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer + 24, 0, 320, 239, "Saved height below minimum clamps to one");
+Height(99); ResetBuffer(); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer + 24, 0, 320, 224, "Saved height above maximum clamps to sixteen");
+Runtime.View.Values[HeightSetting] = "not-an-integer"; mod.OnLoad(); ResetBuffer(); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer + 24, 0, 320, 236, "Malformed saved height falls back to four");
+
+Rejects(() => memory.WriteU16(0x80199426, 0), "Missing native maximum HP");
+Rejects(() => memory.WriteU16(0x80199428, 0), "Death or zero HP");
+Rejects(() => memory.WriteU8(0x801994DD, 0), "Native HUD disabled");
+Rejects(() => memory.WriteU8(Level, 0), "No loaded character");
+var drawing = typeof(MenuWorld).GetField("_drawing", BindingFlags.Static | BindingFlags.NonPublic)!;
+try { Rejects(() => drawing.SetValue(null, true), "Native menu/message world pass"); }
+finally { drawing.SetValue(null, false); }
+Rejects(() => memory.WriteU32(Descriptor + 4, Buffer + 47), "One byte too little room for track and fill");
+Rejects(() => memory.WriteU32(Descriptor + 8, Buffer + 1), "Unaligned primitive cursor");
+Rejects(() => memory.WriteU32(Descriptor + 4, Buffer - 4), "Reversed primitive bounds");
+Rejects(() => memory.WriteU32(ActiveDescriptor, 0x81000000), "Descriptor outside emulated RAM");
+Rejects(() => memory.WriteU32(OrderingTable, 0x81000000), "Ordering table outside emulated RAM");
+Rejects(() => { memory.WriteU32(Descriptor + 8, 0x801FFFF0); memory.WriteU32(Descriptor + 4, 0x80200040); },
+    "Primitive allocation crossing the emulated RAM limit");
+
+ReadyHud(); Character(1, 0, 50); ResetBuffer(24); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer, 0, 320, 236, "Zero-progress track fits in one packet");
+Require(memory.ReadU32(Descriptor + 8) == Buffer + 24 && memory.ReadU32(NativeCursor) == Buffer + 24,
+    "zero progress consumes only one packet");
+Character(1, 50, 50); ResetBuffer(); XpBarMod.Draw(cpu, memory);
+CheckPacket(Buffer, 0, 320, 236, "Full-progress fill reaches the entire screen width");
+
+memory.WriteU32(LevelTable + 8, 50);
+Character(2, 50, 110); Near(XpBarMod.Progress(memory), 0, "native level boundary starts a new interval");
+Character(2, 80, 110); Near(XpBarMod.Progress(memory), 0.5, "ordinary level progress uses its native previous threshold");
+Character(2, 40, 110); Near(XpBarMod.Progress(memory), 0, "XP below the interval clamps to zero");
+Character(2, 120, 110); Near(XpBarMod.Progress(memory), 1, "XP above the interval clamps to full");
+memory.WriteU32(LevelTable + 99 * 12 + 8, 190); memory.WriteU32(LevelTable + 98 * 12 + 8, 180);
+Character(101, 195, 200); Near(XpBarMod.Progress(memory), 0.5, "post-table levels keep the final native threshold interval");
+Character(255, 0, 1000); Near(XpBarMod.Progress(memory), 1, "level cap shows a full bar");
+Character(1, 999999, 1000000); Near(XpBarMod.Progress(memory), 1, "XP cap shows a full bar");
+AssertSilent();
+Console.WriteLine("XP BAR FOCUSED CHECKS PASSED");

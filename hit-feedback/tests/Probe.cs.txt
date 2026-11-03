@@ -1,175 +1,236 @@
 using System.Reflection;
-using System.Runtime.Loader;
-using System.Runtime.InteropServices;
+using Kf2;
+using Lexer.Kf2.HitFeedback;
 using RecompOne.Runtime;
 using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Events;
 using RecompOne.Runtime.Memory;
-using RecompOne.Runtime.Modding;
 
-string installed = args[0];
-var resolver = new AssemblyDependencyResolver(Path.Combine(installed, "Verdite2.dll"));
-AssemblyLoadContext.Default.Resolving += (_, name) =>
-{
-    string? path = resolver.ResolveAssemblyToPath(name);
-    if (path == null && File.Exists(Path.Combine(installed, name.Name + ".dll"))) path = Path.Combine(installed, name.Name + ".dll");
-    return path == null ? null : AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
-};
-AssemblyLoadContext.Default.ResolvingUnmanagedDll += (_, name) =>
-{
-    string? path = resolver.ResolveUnmanagedDllToPath(name);
-    return path == null ? nint.Zero : NativeLibrary.Load(path);
-};
-AppContext.SetData("APP_CONTEXT_BASE_DIRECTORY", installed + "/");
+// No game entry point, disc, save, window, audio initializer or native input is
+// called. Only this process's blank emulated RAM and the mod's hook methods run.
 Runtime.Headless = true;
 Gpu.NoRaster = true;
-Event.AddListener<OverlayLoadedEvent>(_ => Probe.Attach());
-using var timeout = new Timer(_ => { Console.WriteLine("HIT FEEDBACK TIMEOUT"); Environment.Exit(2); }, null, 90000, Timeout.Infinite);
-Event.AddListener<VSyncEvent>(_ =>
+RecompOne.Runtime.Config.ConfigManager.Game.Muted = true;
+RecompOne.Runtime.Config.ConfigManager.Game.MasterVolume = 0;
+void AssertSilent()
 {
-    var game = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "KingsField2");
-    string status = game?.GetType("Kf2.AutoStart")?.GetProperty("Status")?.GetValue(null) as string ?? "";
-    if (status.StartsWith("loaded slot 1 ")) Probe.Ready = true;
-});
-var launcher = AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(installed, "Verdite2.dll"));
-return (int)(launcher.EntryPoint!.Invoke(null, [new string[] {args[1]}]) ?? 1);
-
-static class Probe
-{
-    public static bool Ready;
-    static bool _attached, _tested;
-    static bool _skipSubmit;
-    static readonly ModInfo Mod = new() { Id = "private-hit-feedback-probe", Name = "Private hit diagnostic" };
-    static Type? _mod, _game, _walk;
-    static object? Call(string name, params object[] args) => _mod!.GetMethod(name, BindingFlags.Public|BindingFlags.Static)!.Invoke(null,args);
-    static long[] Times => (long[])_mod!.GetField("Until", BindingFlags.NonPublic|BindingFlags.Static)!.GetValue(null)!;
-    static void Require(bool condition, string name)
-    {
-        if (!condition) throw new Exception("FAIL: " + name);
-        Console.WriteLine("PASS: " + name);
-    }
-    public static void Attach()
-    {
-        if (_attached) return;
-        SymbolRegistry.Build();
-        var player = SymbolRegistry.Resolve("game", null, 0x8002A550);
-        var submit = SymbolRegistry.Resolve("game", null, 0x80032588);
-        if (player == null || submit == null) return;
-        HookManager.AddPost(Mod, player, typeof(Probe).GetMethod(nameof(Player))!, 2000);
-        HookManager.AddPre(Mod, submit, typeof(Probe).GetMethod(nameof(Submit))!,2000);
-        HookManager.Commit();
-        _attached = HookManager.IsCommitted(player);
-    }
-    public static bool Submit(CpuContext c, IMemory m) => !_skipSubmit;
-    public static void Player(CpuContext c, IMemory m)
-    {
-        if (!Ready || _tested) return;
-        _tested = true;
-        try { Run(c,m); Environment.Exit(0); }
-        catch(Exception e) { Console.WriteLine(e); Environment.Exit(9); }
-    }
-    static void Run(CpuContext c, IMemory m)
-    {
-        var entry = ModLoader.Mods.Single(mod=>mod.Info.Id == "lexer.kf2.hit-feedback");
-        Require(entry.Loaded && entry.HookCount == 6, "real native loader compiles and attaches six hooks");
-        _mod = AppDomain.CurrentDomain.GetAssemblies().Select(a=>a.GetType("Lexer.Kf2.HitFeedback.HitFeedbackMod")).First(t=>t!=null);
-        var gameAssembly = AppDomain.CurrentDomain.GetAssemblies().First(a=>a.GetName().Name == "KingsField2");
-        _game = gameAssembly.GetType("Recompiled.KingsField2_game")!;
-        _walk = gameAssembly.GetType("Kf2.ModelWalk")!;
-        var saved = c.Snapshot();
-        const uint rec = 0x8016C544 + 199*0x7C, def=0x80172624;
-        m.WriteU8(rec,1); m.WriteU8(rec+2,0); m.WriteU16(def+0x1A,200);
-        c.A0 = rec;
-        _game.GetMethod("func_80039AFC")!.Invoke(null,[c,m]);
-        Require(m.ReadU16(rec+0x1A)==200, "native spawn uses descriptor maximum HP");
-        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
-        c.SP = saved.SP - 0x2000;
-        for (uint i=0;i<0x40;i+=4) m.WriteU32(c.SP+i,0);
-        m.WriteU32(c.SP+0x28,5000);
-        c.A0=199; c.A1=10; c.A2=10; c.A3=0;
-        long nativeAt=Environment.TickCount64;
-        _game.GetMethod("func_8003A9CC")!.Invoke(null,[c,m]);
-        int nativeLost=200-m.ReadU16(rec+0x1A);
-        long nativeExpected=(long)(nativeLost/200.0*2000);
-        Console.WriteLine($"NATIVE DAMAGE lost={nativeLost}, duration={Times[199]-nativeAt}, expected={nativeExpected}");
-        Require(nativeLost>0 && Math.Abs((Times[199]-nativeAt)-nativeExpected)<100,"actual native damage routine triggers correctly scaled flash");
-        c.Restore(saved);
-        Times[199]=0; m.WriteU16(rec+0x1A,200);
-        c.A0=199;
-        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,150);
-        long at=Environment.TickCount64; Call("AfterDamage",c,m);
-        Require(Times[199]-at>=490 && Times[199]-at<=510,"25 percent max HP loss gives 0.5 seconds at 2 second maximum");
-        Times[199]=0; m.WriteU16(rec+0x1A,200);
-        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,1f);
-        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,180);
-        at=Environment.TickCount64; Call("AfterDamage",c,m);
-        Require(Times[199]-at>=90 && Times[199]-at<=110,"10 percent max HP loss gives 0.1 seconds at 1 second maximum");
-        _mod.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
-        m.WriteU16(rec+0x1A,150);
-        Times[199]=0;
-        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,0); Call("AfterDamage",c,m);
-        Require(Times[199]-Environment.TickCount64>=1490 && Times[199]-Environment.TickCount64<=1510,"killing loss uses actual remaining HP rather than incoming overkill");
-        Times[199]=0; m.WriteU16(rec+0x1A,100);
-        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,101); Call("AfterDamage",c,m);
-        Require(Times[199]==0,"healing does not flash");
-        m.WriteU16(rec+0x1A,250); c.A0=199;
-        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,0); Call("AfterDamage",c,m);
-        Require(Times[199]-Environment.TickCount64>=1990 && Times[199]-Environment.TickCount64<=2010,"damage above maximum HP caps at configured maximum duration");
-        Times[199]=0;
-        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,0f);
-        m.WriteU16(rec+0x1A,200); Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,100); Call("AfterDamage",c,m);
-        Require(Times[199]<=Environment.TickCount64,"zero maximum duration disables flash");
-        _mod.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
-        const uint child=rec-0x7C;
-        m.WriteU8(child,3); m.WriteU16(child+0x22,199); m.WriteU16(rec+0x1A,200);
-        c.A0=198; Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,150); Call("AfterDamage",c,m);
-        Require(Times[199]>Environment.TickCount64 && Times[198]==0,"linked body part damage belongs to parent HP");
-        Times[199]=Environment.TickCount64+10000;
-        var kind=Enum.Parse(gameAssembly.GetType("Kf2.ModelKind")!,"Creature");
-        _walk.GetMethod("SetSubmit")!.Invoke(null,[kind,199,rec]);
-        uint[] previous = Enumerable.Range(13,8).Select(Gte.ReadControl).ToArray();
-        uint rgbc=m.ReadU32(0x8006E604);
-        uint gteRgbc=Gte.Read(6);
-        c.RA=0x800329A0; c.A0=0;
-        _game.GetMethod("func_80034834")!.Invoke(null,[c,m]);
-        Require(Gte.ReadControl(13)==4096 && Enumerable.Range(14,7).All(i=>Gte.ReadControl(i)==0)
-                && (m.ReadU32(0x8006E604)&0xFFFFFF)==255,"native model resolver hook installs red lighting");
-        // A private three-vertex mesh exercises the port's actual retained capture.
-        const uint table=0x80380000, normals=table+0x100, face=table+0x200, vertices=table+0x400;
-        m.WriteU32(0x8018E19C,table); m.WriteU32(0x8018EAA0,vertices);
-        m.WriteU32(table+12+0x14,1); m.WriteU32(table+12+8,normals-table-12); m.WriteU32(table+12+0x10,face-table-12);
-        m.WriteU32(face,0x24000500);
-        m.WriteU16(face+4+0x0C,0); m.WriteU16(face+4+0x0E,0); m.WriteU16(face+4+0x10,8); m.WriteU16(face+4+0x12,16);
-        m.WriteU16(normals,4096); m.WriteU16(normals+2,0); m.WriteU16(normals+4,0);
-        for (uint i=0;i<24;i+=2) m.WriteU16(vertices+i,(ushort)(i==8?100:0));
-        RetainedScene.BeginFrame(new RetainedScene.View {R00=1,R11=1,R22=1,H=160,Cx=160,Cy=120});
-        var retained=gameAssembly.GetType("Kf2.RetainedModels")!;
-        retained.GetField("PosesOn",BindingFlags.Public|BindingFlags.Static)!.SetValue(null,false);
-        bool captured=(bool)retained.GetMethod("TryInstance",BindingFlags.Public|BindingFlags.Static)!.Invoke(null,[m,0u,0u,3u,-1,false])!;
-        var frame=RetainedScene.Find(RetainedScene.Serial)!;
-        Require(captured && frame.Instances.Count==1,"actual retained model capture accepts private mesh");
-        var instance=frame.Instances[0];
-        Require(instance.Rgbc==255 && instance.Bk0==4096 && instance.Bk1==0 && instance.Bk2==0
-                && instance.L0==0 && instance.L4==0 && instance.L8==0,"retained GPU model instance captures red lighting");
-        Gte.Write(6,255); // the CPU polygon assembler copies its per-face RGBC here
-        _skipSubmit=true;
-        try { _game.GetMethod("func_80032588")!.Invoke(null,[c,m]); }
-        finally { _skipSubmit=false; }
-        Require(previous.SequenceEqual(Enumerable.Range(13,8).Select(Gte.ReadControl)) && m.ReadU32(0x8006E604)==rgbc
-                && Gte.Read(6)==gteRgbc,"submit restoration preserves original lighting and CPU RGBC exactly");
-        _walk.GetMethod("SetSubmit")!.Invoke(null,[kind,198,child]);
-        c.RA=0x800329A0; c.A0=0;
-        _game.GetMethod("func_80034834")!.Invoke(null,[c,m]);
-        Require((m.ReadU32(0x8006E604)&0xFFFFFF)==255,"linked body part rendering inherits parent flash");
-        Call("Restore",c,m);
-        Call("Loaded",c,m);
-        Require(Times.All(t=>t==0),"save-load boundary clears old flash state");
-        Times[199]=Environment.TickCount64+10000;
-        c.A0=rec; _game.GetMethod("func_80039AFC")!.Invoke(null,[c,m]);
-        Require(Times[199]==0,"native respawn clears reused creature flash");
-        Times[199]=Environment.TickCount64+10000;
-        ModLoader.SetEnabled("lexer.kf2.hit-feedback",false);
-        Require(!entry.Loaded && Times.All(t=>t==0),"native disable unloads hooks and clears flash state");
-        c.Restore(saved);
-    }
+    var audio = typeof(Runtime).Assembly.GetType("RecompOne.Runtime.Host.Audio")!;
+    Require(new[] { "_alc", "_al", "_mixerThread" }.All(n => audio.GetField(n, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null) == null)
+            && (uint)audio.GetField("_source", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)! == 0,
+        "no audio API, output source or mixer thread");
+    Require(!RecompOne.Runtime.Host.GpuJobs.Claimed, "no graphics host thread started");
 }
+AssertSilent();
+var memory = new PSMemory();
+var cpu = new CpuContext();
+Runtime.SetContext(cpu, memory);
+var mod = new HitFeedbackMod();
+const uint First = 0x8016C544, Definition = 0x80172624, Colour = 0x8006E604;
+const int Parent = 199, Child = 198;
+uint Record(int slot) => First + (uint)slot * 0x7C;
+memory.WriteU8(Record(Parent), 1);
+memory.WriteU8(Record(Parent) + 2, 0);
+memory.WriteU16(Definition + 0x1A, 200);
+memory.WriteU8(Record(Child), 3);
+memory.WriteU16(Record(Child) + 0x22, Parent);
+
+void Require(bool condition, string name)
+{
+    if (!condition) throw new Exception("FAIL: " + name);
+    Console.WriteLine("PASS: " + name);
+}
+void Near(float actual, float expected, string name) => Require(Math.Abs(actual - expected) < 0.00001f, name);
+var type = typeof(HitFeedbackMod);
+Array Flashes() => (Array)type.GetField("Flashes", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+(long Start, long End) Times(int slot)
+{
+    object flash = Flashes().GetValue(slot)!;
+    var t = flash.GetType();
+    return ((long)t.GetProperty("Started")!.GetValue(flash)!, (long)t.GetProperty("Ends")!.GetValue(flash)!);
+}
+float Intensity(int slot, long time) => (float)type.GetMethod("Intensity", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [slot, time])!;
+void Settings(float seconds, float red)
+{
+    mod.OnUnload();
+    Runtime.View.SetFloat("lexer.kf2.hitfeedback.maximumseconds", seconds);
+    Runtime.View.SetFloat("lexer.kf2.hitfeedback.redintensity", red);
+    mod.OnLoad();
+}
+void Hit(int before, int after, int target = Parent)
+{
+    memory.WriteU16(Record(Parent) + 0x1A, (ushort)before);
+    cpu.A0 = (uint)target;
+    HitFeedbackMod.BeforeDamage(cpu, memory);
+    memory.WriteU16(Record(Parent) + 0x1A, (ushort)after);
+    HitFeedbackMod.AfterDamage(cpu, memory);
+}
+void Submit(int slot)
+{
+    RetainedScene.BeginFrame(default(RetainedScene.View));
+    ModelWalk.SetSubmit(ModelKind.Creature, slot, Record(slot));
+    HitFeedbackMod.BeforeModel(cpu, memory);
+    RetainedScene.Find(RetainedScene.Serial)!.Instances.Add(default);
+    HitFeedbackMod.AfterModel(cpu, memory);
+}
+RetainedScene.MainView = RetainedScene.Supported = true;
+var walkOwns = typeof(ModelWalk).GetField("_walkOwns", BindingFlags.Static | BindingFlags.NonPublic)!;
+walkOwns.SetValue(null, true);
+
+Runtime.View.Values.Remove("lexer.kf2.hitfeedback.maximumseconds");
+Runtime.View.Values.Remove("lexer.kf2.hitfeedback.redintensity");
+mod.OnLoad();
+Hit(200, 100);
+var pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 300, "default 0.6-second maximum gives 300 ms for a half-HP hit");
+Near(Intensity(Parent, pulse.Start), 0.25f, "default red intensity is 50 percent");
+
+Settings(2, 50);
+Hit(200, 50);
+pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 1500, "75 percent actual HP loss gives 1.5 seconds at a 2-second maximum");
+Near(Intensity(Parent, pulse.Start), 0.375f, "25 percent remaining HP at 50 percent intensity gives 37.5 percent red");
+Near(Intensity(Parent, pulse.Start + 750), 0.1875f, "red intensity fades linearly to half at half duration");
+Near(Intensity(Parent, pulse.End), 0, "red intensity reaches zero exactly at expiry");
+Near(Intensity(Parent, pulse.End + 1), 0, "expired red intensity remains zero");
+
+Hit(200, 100);
+var first = Times(Parent);
+Hit(100, 50);
+var second = Times(Parent);
+Require(first.End - first.Start == 1000 && second.End - second.Start == 500,
+    "overlapping hit replaces rather than inherits the older longer duration");
+Near(Intensity(Parent, second.Start), 0.375f, "overlapping hit recalculates post-hit peak without additive stacking");
+Hit(50, 60);
+Require(Times(Parent) == second, "healing does not start, restart or cancel a pulse");
+Hit(60, 60);
+Require(Times(Parent) == second, "no-damage call leaves the existing pulse unchanged");
+
+Hit(200, 50, Child);
+pulse = Times(Parent);
+Require(Times(Child) == (0L, 0L), "linked part damage stores only one parent pulse");
+Near(Intensity(Parent, pulse.Start), 0.375f, "linked part uses parent remaining HP and definition maximum");
+
+// Retained instance colour is mixed after texture/lighting/fog by the renderer.
+// Neither native RGBC nor the GTE light controls are used as a brown fallback.
+Settings(5, 50);
+Hit(200, 50);
+uint original = 0xAA808080, originalGte = 0xBB010203;
+memory.WriteU32(Colour, original);
+Gte.Write(6, originalGte);
+for (int i = 13; i <= 20; i++) Gte.WriteControl(i, (uint)(i * 79));
+var lighting = Enumerable.Range(13, 8).Select(Gte.ReadControl).ToArray();
+RetainedScene.BeginFrame(default(RetainedScene.View));
+var frame = RetainedScene.Find(RetainedScene.Serial)!;
+frame.Instances.Add(new() { ColourMixRgb = 0xFF0000, ColourMix = 0.2f });
+ModelWalk.SetSubmit(ModelKind.Creature, Child, Record(Child));
+HitFeedbackMod.BeforeModel(cpu, memory);
+frame.Instances.Add(new() { Rgbc = original, Material = 7, Tx = 123, MeshStart = 5 });
+frame.MirrorInstances.Add(new() { Rgbc = original, Material = 8, Tx = 456, MeshStart = 6 });
+HitFeedbackMod.AfterModel(cpu, memory);
+Require(frame.Instances[0].ColourMixRgb == 0xFF0000 && frame.Instances[0].ColourMix == 0.2f,
+    "pre-existing unrelated instances are untouched");
+Require(frame.Instances[1].ColourMixRgb == 0x0000FF && frame.Instances[1].ColourMix is > 0.365f and <= 0.375f,
+    "linked main instance carries the post-hit red target and strength");
+Require(frame.MirrorInstances[0].ColourMixRgb == 0x0000FF && frame.MirrorInstances[0].ColourMix == frame.Instances[1].ColourMix,
+    "mirror instances receive the same per-draw red strength");
+Require(frame.Instances[1].Rgbc == original && frame.Instances[1].Material == 7 && frame.Instances[1].Tx == 123 && frame.Instances[1].MeshStart == 5,
+    "instance geometry, lighting color and material remain native");
+Require(memory.ReadU32(Colour) == original && Gte.Read(6) == originalGte && lighting.SequenceEqual(Enumerable.Range(13, 8).Select(Gte.ReadControl)),
+    "render hooks never alter native memory RGBC, GTE RGBC or lighting");
+
+// A nested inactive object must not inherit the outer creature's tint. Parent
+// segments on either side remain owned by the parent; every callback is balanced.
+RetainedScene.BeginFrame(default(RetainedScene.View)); frame = RetainedScene.Find(RetainedScene.Serial)!;
+ModelWalk.SetSubmit(ModelKind.Creature, Parent, Record(Parent)); HitFeedbackMod.BeforeModel(cpu, memory);
+frame.Instances.Add(default);
+ModelWalk.SetSubmit(ModelKind.Object, 0, 0x80177714); HitFeedbackMod.BeforeModel(cpu, memory);
+frame.Instances.Add(default); HitFeedbackMod.AfterModel(cpu, memory);
+frame.Instances.Add(default); HitFeedbackMod.AfterModel(cpu, memory);
+Require(frame.Instances[0].ColourMix > 0 && frame.Instances[1].ColourMix == 0 && frame.Instances[2].ColourMix > 0,
+    "nested unrelated draws are excluded without dropping either parent segment");
+ModelWalk.SetSubmit(ModelKind.Creature, Parent, Record(Parent)); HitFeedbackMod.BeforeModel(cpu, memory);
+RetainedScene.BeginFrame(default(RetainedScene.View)); frame = RetainedScene.Find(RetainedScene.Serial)!;
+frame.Instances.Add(default); HitFeedbackMod.AfterModel(cpu, memory);
+Require(frame.Instances[0].ColourMix == 0, "frame serial change cannot color a different frame");
+walkOwns.SetValue(null, false); Submit(Parent);
+Require(RetainedScene.Find(RetainedScene.Serial)!.Instances[0].ColourMix == 0, "menus and previews with stale Creature context are inert");
+var mirrorReplay = typeof(PlanarWalk).GetField("_replaying", BindingFlags.Static | BindingFlags.NonPublic)!;
+mirrorReplay.SetValue(null, true);
+Require(PlanarWalk.Replaying, "explicit native mirror replay is a world scope");
+Submit(Parent);
+Require(RetainedScene.Find(RetainedScene.Serial)!.Instances[0].ColourMix > 0,
+    "a genuine mirror-replayed creature can receive final RGB feedback outside the main walk");
+mirrorReplay.SetValue(null, false);
+walkOwns.SetValue(null, true);
+foreach (bool main in new[] { false, true })
+{
+    RetainedScene.MainView = main; RetainedScene.Supported = !main; Submit(Parent);
+    Require(RetainedScene.Find(RetainedScene.Serial)!.Instances[0].ColourMix == 0, "unsupported/packet rendering has no RGBC fallback");
+}
+RetainedScene.MainView = RetainedScene.Supported = true;
+
+// Simulate the existing native slider changing an active pulse to zero intensity.
+type.GetField("_redPercent", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, 0f);
+Submit(Parent);
+Require(memory.ReadU32(Colour) == original && Gte.Read(6) == originalGte && lighting.SequenceEqual(Enumerable.Range(13, 8).Select(Gte.ReadControl)),
+    "zero red intensity is fully inert, including an already active pulse");
+Require(RetainedScene.Find(RetainedScene.Serial)!.Instances[0].ColourMix == 0, "zero red intensity sets no instance effect");
+Near(Intensity(Parent, Times(Parent).Start), 0, "zero configured red intensity gives zero peak");
+
+Settings(0, 50);
+Hit(200, 50);
+Require(Times(Parent) == (0L, 0L), "zero maximum duration creates no pulse");
+Settings(5, 100);
+Hit(250, 0);
+pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 5000, "damage beyond definition maximum caps at maximum duration");
+Near(Intensity(Parent, pulse.Start), 1, "100 percent setting and zero HP cap peak at one without stacking");
+Settings(2, 50);
+Hit(50, 0);
+pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 500, "killing blow duration uses actual remaining HP lost");
+Near(Intensity(Parent, pulse.Start), 0.5f, "killing blow reaches configured intensity, not opaque red");
+cpu.A0 = Record(Parent);
+HitFeedbackMod.Spawn(cpu, memory);
+Require(Times(Parent) == (0L, 0L), "spawn clears stale colour from a reused creature slot");
+
+Hit(200, 50);
+HitFeedbackMod.Loaded(cpu, memory);
+Require(Times(Parent) == (0L, 0L), "save load clears the previous pulse");
+Hit(200, 50);
+Event.Dispatch(new OverlayLoadedEvent { Name = "game" });
+Require(Times(Parent) == (0L, 0L), "new-game overlay clears the previous pulse");
+Hit(200, 50);
+RetainedScene.BeginFrame(default(RetainedScene.View)); frame = RetainedScene.Find(RetainedScene.Serial)!;
+ModelWalk.SetSubmit(ModelKind.Creature, Parent, Record(Parent)); HitFeedbackMod.BeforeModel(cpu, memory);
+frame.Instances.Add(default);
+mod.OnUnload();
+HitFeedbackMod.AfterModel(cpu, memory);
+Require(Times(Parent) == (0L, 0L) && frame.Instances[0].ColourMix == 0 && memory.ReadU32(Colour) == original && Gte.Read(6) == originalGte,
+    "disable clears pulses and a draw in progress without touching native colour");
+
+Settings(float.NaN, float.PositiveInfinity);
+Hit(200, 100);
+pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 300, "invalid saved duration falls back to 0.6 seconds");
+Near(Intensity(Parent, pulse.Start), 0.25f, "invalid saved intensity falls back to 50 percent");
+Settings(99, -20);
+Hit(200, 0);
+pulse = Times(Parent);
+Require(pulse.End - pulse.Start == 5000, "saved duration is bounded at five seconds");
+Near(Intensity(Parent, pulse.Start), 0, "negative saved intensity is bounded at zero");
+Settings(2, 150);
+Hit(200, 0);
+Near(Intensity(Parent, Times(Parent).Start), 1, "saved red intensity is bounded at 100 percent");
+
+// Expiry through the real model hooks is inert; this wait is bounded to 20 ms.
+Settings(0.01f, 50);
+Hit(200, 100);
+Thread.Sleep(20);
+Submit(Parent);
+Require(memory.ReadU32(Colour) == original && Gte.Read(6) == originalGte, "expired pulse does not touch native colour");
+Require(RetainedScene.Find(RetainedScene.Serial)!.Instances[0].ColourMix == 0, "expired pulse creates no instance effect");
+mod.OnUnload();
+walkOwns.SetValue(null, false);
+AssertSilent();
+Console.WriteLine("HIT FEEDBACK FOCUSED CHECKS PASSED");
