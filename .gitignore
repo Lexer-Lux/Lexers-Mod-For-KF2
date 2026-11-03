@@ -1,0 +1,7 @@
+**/.cache/
+**/bin/
+**/obj/
+**/mod-data/
+*.sav
+*.dll
+*.exe

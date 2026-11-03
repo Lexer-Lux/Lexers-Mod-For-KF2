@@ -1,0 +1,8 @@
+{
+  "id": "lexer.kf2.better-poison",
+  "name": "Better Poison",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Native poison notices and green poison damage flashes.",
+  "enabled": true
+}

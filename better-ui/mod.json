@@ -1,0 +1,9 @@
+{
+  "id": "lexer.kf2.better-ui",
+  "name": "Better UI",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Shows item names during the game's original pickup presentation.",
+  "credits": "Verdite2 and RecompOne (MIT) provide the native mod hooks and menu routines. Acranon's iteminfo source documents the live item-name table.",
+  "enabled": true
+}

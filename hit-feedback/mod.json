@@ -1,0 +1,9 @@
+{
+  "id": "lexer.kf2.hit-feedback",
+  "name": "Hit Feedback",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Enemies flash red when damaged, with duration proportional to the share of maximum HP lost.",
+  "credits": "Verdite2 and RecompOne (MIT)",
+  "enabled": true
+}

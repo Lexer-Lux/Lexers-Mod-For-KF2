@@ -1,0 +1,9 @@
+{
+  "id": "lexer.kf2.xp-bar",
+  "name": "XP Bar",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "A thin full-width bar at the bottom of the game picture showing progress toward the next level.",
+  "credits": "Verdite2 and RecompOne native source-mod API.",
+  "enabled": true
+}

@@ -1,0 +1,8 @@
+{
+  "id": "lexer.kf2.auto-pick-up-all",
+  "name": "Auto Pick Up All",
+  "version": "0.1.0",
+  "author": "Lexer",
+  "description": "Collect loose items and gold when you walk over them, using native pickup rules.",
+  "enabled": true
+}

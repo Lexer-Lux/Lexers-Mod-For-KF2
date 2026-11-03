@@ -1,0 +1,168 @@
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Runtime.InteropServices;
+using RecompOne.Runtime;
+using RecompOne.Runtime.Context;
+using RecompOne.Runtime.Events;
+using RecompOne.Runtime.Memory;
+using RecompOne.Runtime.Modding;
+
+string installed = args[0];
+var resolver = new AssemblyDependencyResolver(Path.Combine(installed, "Verdite2.dll"));
+AssemblyLoadContext.Default.Resolving += (_, name) =>
+{
+    string? path = resolver.ResolveAssemblyToPath(name);
+    if (path == null && File.Exists(Path.Combine(installed, name.Name + ".dll"))) path = Path.Combine(installed, name.Name + ".dll");
+    return path == null ? null : AssemblyLoadContext.Default.LoadFromAssemblyPath(path);
+};
+AssemblyLoadContext.Default.ResolvingUnmanagedDll += (_, name) =>
+{
+    string? path = resolver.ResolveUnmanagedDllToPath(name);
+    return path == null ? nint.Zero : NativeLibrary.Load(path);
+};
+AppContext.SetData("APP_CONTEXT_BASE_DIRECTORY", installed + "/");
+Runtime.Headless = true;
+Gpu.NoRaster = true;
+Event.AddListener<OverlayLoadedEvent>(_ => Probe.Attach());
+using var timeout = new Timer(_ => { Console.WriteLine("HIT FEEDBACK TIMEOUT"); Environment.Exit(2); }, null, 90000, Timeout.Infinite);
+Event.AddListener<VSyncEvent>(_ =>
+{
+    var game = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "KingsField2");
+    string status = game?.GetType("Kf2.AutoStart")?.GetProperty("Status")?.GetValue(null) as string ?? "";
+    if (status.StartsWith("loaded slot 1 ")) Probe.Ready = true;
+});
+var launcher = AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.Combine(installed, "Verdite2.dll"));
+return (int)(launcher.EntryPoint!.Invoke(null, [new string[] {args[1]}]) ?? 1);
+
+static class Probe
+{
+    public static bool Ready;
+    static bool _attached, _tested;
+    static bool _skipSubmit;
+    static readonly ModInfo Mod = new() { Id = "private-hit-feedback-probe", Name = "Private hit diagnostic" };
+    static Type? _mod, _game, _walk;
+    static object? Call(string name, params object[] args) => _mod!.GetMethod(name, BindingFlags.Public|BindingFlags.Static)!.Invoke(null,args);
+    static long[] Times => (long[])_mod!.GetField("Until", BindingFlags.NonPublic|BindingFlags.Static)!.GetValue(null)!;
+    static void Require(bool condition, string name)
+    {
+        if (!condition) throw new Exception("FAIL: " + name);
+        Console.WriteLine("PASS: " + name);
+    }
+    public static void Attach()
+    {
+        if (_attached) return;
+        SymbolRegistry.Build();
+        var player = SymbolRegistry.Resolve("game", null, 0x8002A550);
+        var submit = SymbolRegistry.Resolve("game", null, 0x80032588);
+        if (player == null || submit == null) return;
+        HookManager.AddPost(Mod, player, typeof(Probe).GetMethod(nameof(Player))!, 2000);
+        HookManager.AddPre(Mod, submit, typeof(Probe).GetMethod(nameof(Submit))!,2000);
+        HookManager.Commit();
+        _attached = HookManager.IsCommitted(player);
+    }
+    public static bool Submit(CpuContext c, IMemory m) => !_skipSubmit;
+    public static void Player(CpuContext c, IMemory m)
+    {
+        if (!Ready || _tested) return;
+        _tested = true;
+        try { Run(c,m); Environment.Exit(0); }
+        catch(Exception e) { Console.WriteLine(e); Environment.Exit(9); }
+    }
+    static void Run(CpuContext c, IMemory m)
+    {
+        var entry = ModLoader.Mods.Single(mod=>mod.Info.Id == "lexer.kf2.hit-feedback");
+        Require(entry.Loaded && entry.HookCount == 6, "real native loader compiles and attaches six hooks");
+        _mod = AppDomain.CurrentDomain.GetAssemblies().Select(a=>a.GetType("Lexer.Kf2.HitFeedback.HitFeedbackMod")).First(t=>t!=null);
+        var gameAssembly = AppDomain.CurrentDomain.GetAssemblies().First(a=>a.GetName().Name == "KingsField2");
+        _game = gameAssembly.GetType("Recompiled.KingsField2_game")!;
+        _walk = gameAssembly.GetType("Kf2.ModelWalk")!;
+        var saved = c.Snapshot();
+        const uint rec = 0x8016C544 + 199*0x7C, def=0x80172624;
+        m.WriteU8(rec,1); m.WriteU8(rec+2,0); m.WriteU16(def+0x1A,200);
+        c.A0 = rec;
+        _game.GetMethod("func_80039AFC")!.Invoke(null,[c,m]);
+        Require(m.ReadU16(rec+0x1A)==200, "native spawn uses descriptor maximum HP");
+        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
+        c.SP = saved.SP - 0x2000;
+        for (uint i=0;i<0x40;i+=4) m.WriteU32(c.SP+i,0);
+        m.WriteU32(c.SP+0x28,5000);
+        c.A0=199; c.A1=10; c.A2=10; c.A3=0;
+        long nativeAt=Environment.TickCount64;
+        _game.GetMethod("func_8003A9CC")!.Invoke(null,[c,m]);
+        int nativeLost=200-m.ReadU16(rec+0x1A);
+        long nativeExpected=(long)(nativeLost/200.0*2000);
+        Console.WriteLine($"NATIVE DAMAGE lost={nativeLost}, duration={Times[199]-nativeAt}, expected={nativeExpected}");
+        Require(nativeLost>0 && Math.Abs((Times[199]-nativeAt)-nativeExpected)<100,"actual native damage routine triggers correctly scaled flash");
+        c.Restore(saved);
+        Times[199]=0; m.WriteU16(rec+0x1A,200);
+        c.A0=199;
+        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,150);
+        long at=Environment.TickCount64; Call("AfterDamage",c,m);
+        Require(Times[199]-at>=490 && Times[199]-at<=510,"25 percent max HP loss gives 0.5 seconds at 2 second maximum");
+        Times[199]=0;
+        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,0); Call("AfterDamage",c,m);
+        Require(Times[199]-Environment.TickCount64>=1490 && Times[199]-Environment.TickCount64<=1510,"killing loss uses actual remaining HP rather than incoming overkill");
+        Times[199]=0; m.WriteU16(rec+0x1A,100);
+        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,101); Call("AfterDamage",c,m);
+        Require(Times[199]==0,"healing does not flash");
+        m.WriteU16(rec+0x1A,250); c.A0=199;
+        Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,0); Call("AfterDamage",c,m);
+        Require(Times[199]-Environment.TickCount64>=1990 && Times[199]-Environment.TickCount64<=2010,"damage above maximum HP caps at configured maximum duration");
+        Times[199]=0;
+        _mod!.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,0f);
+        m.WriteU16(rec+0x1A,200); Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,100); Call("AfterDamage",c,m);
+        Require(Times[199]<=Environment.TickCount64,"zero maximum duration disables flash");
+        _mod.GetField("_maximumSeconds",BindingFlags.NonPublic|BindingFlags.Static)!.SetValue(null,2f);
+        const uint child=rec-0x7C;
+        m.WriteU8(child,3); m.WriteU16(child+0x22,199); m.WriteU16(rec+0x1A,200);
+        c.A0=198; Call("BeforeDamage",c,m); m.WriteU16(rec+0x1A,150); Call("AfterDamage",c,m);
+        Require(Times[199]>Environment.TickCount64 && Times[198]==0,"linked body part damage belongs to parent HP");
+        Times[199]=Environment.TickCount64+10000;
+        var kind=Enum.Parse(gameAssembly.GetType("Kf2.ModelKind")!,"Creature");
+        _walk.GetMethod("SetSubmit")!.Invoke(null,[kind,199,rec]);
+        uint[] previous = Enumerable.Range(13,8).Select(Gte.ReadControl).ToArray();
+        uint rgbc=m.ReadU32(0x8006E604);
+        uint gteRgbc=Gte.Read(6);
+        c.RA=0x800329A0; c.A0=0;
+        _game.GetMethod("func_80034834")!.Invoke(null,[c,m]);
+        Require(Gte.ReadControl(13)==4096 && Enumerable.Range(14,7).All(i=>Gte.ReadControl(i)==0)
+                && (m.ReadU32(0x8006E604)&0xFFFFFF)==255,"native model resolver hook installs red lighting");
+        // A private three-vertex mesh exercises the port's actual retained capture.
+        const uint table=0x80380000, normals=table+0x100, face=table+0x200, vertices=table+0x400;
+        m.WriteU32(0x8018E19C,table); m.WriteU32(0x8018EAA0,vertices);
+        m.WriteU32(table+12+0x14,1); m.WriteU32(table+12+8,normals-table-12); m.WriteU32(table+12+0x10,face-table-12);
+        m.WriteU32(face,0x24000500);
+        m.WriteU16(face+4+0x0C,0); m.WriteU16(face+4+0x0E,0); m.WriteU16(face+4+0x10,8); m.WriteU16(face+4+0x12,16);
+        m.WriteU16(normals,4096); m.WriteU16(normals+2,0); m.WriteU16(normals+4,0);
+        for (uint i=0;i<24;i+=2) m.WriteU16(vertices+i,(ushort)(i==8?100:0));
+        RetainedScene.BeginFrame(new RetainedScene.View {R00=1,R11=1,R22=1,H=160,Cx=160,Cy=120});
+        var retained=gameAssembly.GetType("Kf2.RetainedModels")!;
+        retained.GetField("PosesOn",BindingFlags.Public|BindingFlags.Static)!.SetValue(null,false);
+        bool captured=(bool)retained.GetMethod("TryInstance",BindingFlags.Public|BindingFlags.Static)!.Invoke(null,[m,0u,0u,3u,-1,false])!;
+        var frame=RetainedScene.Find(RetainedScene.Serial)!;
+        Require(captured && frame.Instances.Count==1,"actual retained model capture accepts private mesh");
+        var instance=frame.Instances[0];
+        Require(instance.Rgbc==255 && instance.Bk0==4096 && instance.Bk1==0 && instance.Bk2==0
+                && instance.L0==0 && instance.L4==0 && instance.L8==0,"retained GPU model instance captures red lighting");
+        Gte.Write(6,255); // the CPU polygon assembler copies its per-face RGBC here
+        _skipSubmit=true;
+        try { _game.GetMethod("func_80032588")!.Invoke(null,[c,m]); }
+        finally { _skipSubmit=false; }
+        Require(previous.SequenceEqual(Enumerable.Range(13,8).Select(Gte.ReadControl)) && m.ReadU32(0x8006E604)==rgbc
+                && Gte.Read(6)==gteRgbc,"submit restoration preserves original lighting and CPU RGBC exactly");
+        _walk.GetMethod("SetSubmit")!.Invoke(null,[kind,198,child]);
+        c.RA=0x800329A0; c.A0=0;
+        _game.GetMethod("func_80034834")!.Invoke(null,[c,m]);
+        Require((m.ReadU32(0x8006E604)&0xFFFFFF)==255,"linked body part rendering inherits parent flash");
+        Call("Restore",c,m);
+        Call("Loaded",c,m);
+        Require(Times.All(t=>t==0),"save-load boundary clears old flash state");
+        Times[199]=Environment.TickCount64+10000;
+        c.A0=rec; _game.GetMethod("func_80039AFC")!.Invoke(null,[c,m]);
+        Require(Times[199]==0,"native respawn clears reused creature flash");
+        Times[199]=Environment.TickCount64+10000;
+        ModLoader.SetEnabled("lexer.kf2.hit-feedback",false);
+        Require(!entry.Loaded && Times.All(t=>t==0),"native disable unloads hooks and clears flash state");
+        c.Restore(saved);
+    }
+}
