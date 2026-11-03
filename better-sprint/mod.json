@@ -1,7 +1,7 @@
 {
   "id": "lexer.kf2.better-sprint",
   "name": "Better Sprint",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Lexer",
   "description": "Movement-only running drain, optional free magic power, and release-to-run again after exhaustion.",
   "credits": "Verdite2 and RecompOne native source-mod API.",

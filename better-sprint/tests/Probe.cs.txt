@@ -37,7 +37,8 @@ void Tick(bool moved=true,bool modern=false,Action? action=null)
 }
 Prepare();Recompiled.KingsField2_game.func_8002957C(c,m);
 Check(m.ReadU16(Power)==4500&&m.ReadU16(Magic)==4500,"actual unhooked native run drains both gauges500");
-Prepare();Tick();Check(m.ReadU16(Power)==4500&&m.ReadU16(Magic)==5000,"default physical500, no magic-power cost");
+Prepare();for(int i=0;i<15;i++)Tick();
+Check(m.ReadU16(Power)==3750&&m.ReadU16(Magic)==5000,"default drains 25 percent over 15 moving ticks");
 Prepare();Set("_freeMagic",false);Set("_rate",75f);Tick();
 Check(m.ReadU16(Power)==4750&&m.ReadU16(Magic)==4750,"optional magic cost follows configured75percent-per-second rate");
 Prepare();Tick(false);Check(m.ReadU16(Power)==5000&&m.ReadU16(Magic)==5000,"stationary/wall costs neither gauge");
@@ -46,7 +47,7 @@ Prepare();Tick(action:()=>{m.WriteU16(Power,0);m.WriteU16(Magic,3500);});
 Check(m.ReadU16(Magic)>=3500&&m.ReadU16(0x80199422)==0,"action exhausting physical power blocks later native run charge without undoing action cost");
 foreach(bool modern in new[]{false,true})
 {
-    Prepare(100,modern);Tick(modern:modern);Check(m.ReadU16(Power)==0,"exhaustion reaches zero");
+    Prepare(50,modern);Tick(modern:modern);Check(m.ReadU16(Power)==0,"exhaustion reaches zero");
     m.WriteU16(Power,3000);m.WriteU16(0x80199422,2000);Tick(modern:modern);
     Check(m.ReadU16(Power)>=3000&&m.ReadU16(0x80199422)==0,"recovered gauge cannot restart held run, including positive ramp");
     BetterSprintMod.Menu(c,m);Tick(false,modern);
@@ -55,7 +56,7 @@ foreach(bool modern in new[]{false,true})
     m.WriteU16(Pad,Other);m.WriteU16(Last,Other);Tick(false,modern);
     m.WriteU16(Power,3000);
     m.WriteU16(Pad,(ushort)(Other|(modern?0x200:Use)));m.WriteU16(Last,m.ReadU16(Pad));Tick(modern:modern);
-    Check(m.ReadU16(Power)==2500,"release and fresh press rearm sprint");
+    Check(m.ReadU16(Power)==2917,"release and fresh press rearm sprint");
     BetterSprintMod.Loaded(c,m);Tick(modern:modern);
     Check(m.ReadU16(Power)>=2500,"death/load/status reset requires release of held sprint");
     int beforeDisable=m.ReadU16(Power);

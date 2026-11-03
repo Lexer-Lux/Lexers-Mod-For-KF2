@@ -6,7 +6,7 @@ Lexeditor's Mods tab once that integration is delivered. It is not deployed to
 the player's active game by this folder alone.
 
 The mod gear exposes **Stamina drain (%/second)**, from 0 to 300. The default is
-**150**, the measured vanilla rate: 500 points per 15 Hz world tick from each
+**25**. The measured vanilla rate is 150% per second: 500 points per 15 Hz world tick from each
 5000-point physical and magic power gauge. There is no new stamina pool.
 **Running consumes no magic power** defaults on: running charges only physical
 power. Turn it off to charge both gauges at the selected rate. Magic power means
@@ -41,7 +41,7 @@ no live player data or game executable was modified. Its real native mod compile
 loaded all seven hooks. Measurements on actual world ticks confirmed:
 
 - Unchanged position: no drain.
-- Actual movement: 500 points at the default rate.
+- Actual movement: 1250 points per second at the default rate.
 - Saved setting changed to 75, then native disable/re-enable: 250 points while moving.
 - Physical power forced to zero with a carried positive run ramp: native walk
   speed remained 200, with the run ramp zero; walking and native recovery continued.

@@ -1,7 +1,6 @@
 using System;
 using System.Reflection;
 using Kf2;
-using MonoMod.RuntimeDetour;
 using RecompOne.Runtime.Context;
 using RecompOne.Runtime.Memory;
 using RecompOne.Runtime.Modding;
@@ -13,7 +12,7 @@ public sealed class BetterCrystalsMod : IMod
     public const uint Count = 0x8009B578, DragonFlag = 0x801B3089;
     public const uint State = 0x801994E1, Hp = 0x80199428, MaxHp = 0x80199426;
     public const uint DeathFrames = 0x8019951A, CurrentSlot = 0x8006E5D4;
-    static Hook? _reloadHook;
+    static IDisposable? _reloadHook;
     static bool _enabled;
     public static bool Choosing { get; private set; }
     static readonly MethodInfo Load = typeof(AutoReload).GetMethod("LoadSlot", BindingFlags.Static | BindingFlags.NonPublic)!;
@@ -24,10 +23,10 @@ public sealed class BetterCrystalsMod : IMod
         // The port's automatic reload otherwise clamps death at frame31 and
         // prevents the original Dragon Crystal branch at frame65 from running.
         // Hold only that eligible death, without editing the player's setting.
-        // Resolve the exact MethodBase/MethodInfo constructor. The installed
-        // source compiler does not reference the optional expression-tree
-        // assemblies used by Hook's unrelated constructor overloads.
-        _reloadHook = (Hook)typeof(Hook).GetConstructor(new[] { typeof(MethodBase), typeof(MethodInfo) })!
+        // The source compiler takes its references from assemblies already loaded.
+        // Resolve the detour at runtime so compilation needs no MonoMod reference.
+        var hookType = Assembly.Load("MonoMod.RuntimeDetour").GetType("MonoMod.RuntimeDetour.Hook", throwOnError: true)!;
+        _reloadHook = (IDisposable)hookType.GetConstructor(new[] { typeof(MethodBase), typeof(MethodInfo) })!
             .Invoke(new object[] { typeof(AutoReload).GetMethod(nameof(AutoReload.AfterPlayerStage))!,
                 typeof(BetterCrystalsMod).GetMethod(nameof(AllowNativeDecision))! });
         _enabled = true;

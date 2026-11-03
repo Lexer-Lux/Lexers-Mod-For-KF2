@@ -15,7 +15,8 @@ public sealed class BetterSprintMod : IMod
     const uint Pad = 0x80199554, LastPad = 0x80199556, UseMask = 0x8006E568;
     const uint X = 0x801994EC, Z = 0x801994F4;
     const int FullPower = 5000, VanillaDrain = 500;
-    static float _rate = 150f, _fraction;
+    const float DefaultRate = 25f;
+    static float _rate = DefaultRate, _fraction;
     static bool _player, _inside, _eligible, _pending;
     static bool _freeMagic = true, _exhausted;
     static uint _x, _z;
@@ -23,8 +24,8 @@ public sealed class BetterSprintMod : IMod
 
     public void OnLoad()
     {
-        float value = Runtime.View.GetFloat(Setting, 150f);
-        _rate = float.IsFinite(value) ? Math.Clamp(value, 0f, 300f) : 150f;
+        float value = Runtime.View.GetFloat(Setting, DefaultRate);
+        _rate = float.IsFinite(value) ? Math.Clamp(value, 0f, 300f) : DefaultRate;
         _freeMagic = Runtime.View.GetBool(FreeMagicSetting, true);
         Reset();
     }
@@ -39,7 +40,7 @@ public sealed class BetterSprintMod : IMod
     {
         if (ImGui.SliderFloat("Stamina drain (%/second)", ref _rate, 0f, 300f, "%.1f%%", ImGuiSliderFlags.AlwaysClamp))
         {
-            _rate = float.IsFinite(_rate) ? Math.Clamp(_rate, 0f, 300f) : 150f;
+            _rate = float.IsFinite(_rate) ? Math.Clamp(_rate, 0f, 300f) : DefaultRate;
             Runtime.View.SetFloat(Setting, _rate);
             Runtime.SaveView();
         }
